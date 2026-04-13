@@ -18,6 +18,14 @@
 #define DOOM_SND_STOP    ('d' << 24 | 3)
 #define DOOM_SND_UPDATE  ('d' << 24 | 4)
 #define DOOM_SND_POLL    ('d' << 24 | 5)
+#define DOOM_MUS_REGISTER   ('d' << 24 | 6)
+#define DOOM_MUS_UNREGISTER ('d' << 24 | 7)
+#define DOOM_MUS_PLAY       ('d' << 24 | 8)
+#define DOOM_MUS_STOP       ('d' << 24 | 9)
+#define DOOM_MUS_VOLUME     ('d' << 24 | 10)
+#define DOOM_MUS_PAUSE      ('d' << 24 | 11)
+#define DOOM_MUS_RESUME     ('d' << 24 | 12)
+#define DOOM_MUS_IS_PLAYING ('d' << 24 | 13)
 
 #ifdef CMAP256
 
@@ -52,6 +60,15 @@ int DG_SndStart(int lumpnum, void *data, int datalen,
 void DG_SndStop(int channel);
 void DG_SndUpdateParams(int channel, int vol, int sep);
 uint32_t DG_SndPoll(void);
+
+uint32_t DG_MusRegister(void *data, int len);
+void DG_MusUnregister(uint32_t handle);
+void DG_MusPlay(uint32_t handle, int looping);
+void DG_MusStop(void);
+void DG_MusSetVolume(int volume);
+void DG_MusPause(void);
+void DG_MusResume(void);
+int DG_MusIsPlaying(void);
 #endif
 
 #ifdef __cplusplus

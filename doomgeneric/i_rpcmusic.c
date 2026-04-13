@@ -1,7 +1,7 @@
 //
-// Stub music module for GPU port.
-// Music requires MIDI playback (SDL_mixer or OPL emulation) which is not
-// yet implemented. Init returns false so i_sound.c gracefully disables music.
+// RPC-based music module for GPU port.
+// Sends raw MUS/MIDI lump data to the host, which converts MUS to MIDI
+// and plays it using the Windows MIDI API.
 //
 
 #include "doomtype.h"
@@ -9,41 +9,97 @@
 
 #ifdef FEATURE_SOUND
 
+#include "doomgeneric.h"
 #include "i_sound.h"
+
+static boolean music_initialized = false;
+static uint32_t current_handle = 0;
 
 static boolean RPC_InitMusic(void)
 {
-    return false;
+    music_initialized = true;
+    return true;
 }
 
-static void RPC_ShutdownMusic(void) {}
-static void RPC_SetMusicVolume(int volume) { (void)volume; }
-static void RPC_PauseMusic(void) {}
-static void RPC_ResumeMusic(void) {}
+static void RPC_ShutdownMusic(void)
+{
+    if (current_handle) {
+        DG_MusStop();
+        DG_MusUnregister(current_handle);
+        current_handle = 0;
+    }
+    music_initialized = false;
+}
+
+static void RPC_SetMusicVolume(int volume)
+{
+    if (!music_initialized)
+        return;
+    DG_MusSetVolume(volume);
+}
+
+static void RPC_PauseMusic(void)
+{
+    if (!music_initialized)
+        return;
+    DG_MusPause();
+}
+
+static void RPC_ResumeMusic(void)
+{
+    if (!music_initialized)
+        return;
+    DG_MusResume();
+}
 
 static void *RPC_RegisterSong(void *data, int len)
 {
-    (void)data;
-    (void)len;
-    return NULL;
+    uint32_t handle;
+    if (!music_initialized)
+        return NULL;
+    handle = DG_MusRegister(data, len);
+    if (handle == 0)
+        return NULL;
+    return (void *)(uintptr_t)handle;
 }
 
-static void RPC_UnRegisterSong(void *handle) { (void)handle; }
+static void RPC_UnRegisterSong(void *handle)
+{
+    uint32_t h;
+    if (!music_initialized || !handle)
+        return;
+    h = (uint32_t)(uintptr_t)handle;
+    if (h == current_handle)
+        current_handle = 0;
+    DG_MusUnregister(h);
+}
 
 static void RPC_PlaySong(void *handle, boolean looping)
 {
-    (void)handle;
-    (void)looping;
+    if (!music_initialized || !handle)
+        return;
+    current_handle = (uint32_t)(uintptr_t)handle;
+    DG_MusPlay(current_handle, looping);
 }
 
-static void RPC_StopSong(void) {}
+static void RPC_StopSong(void)
+{
+    if (!music_initialized)
+        return;
+    DG_MusStop();
+}
 
 static boolean RPC_MusicIsPlaying(void)
 {
-    return false;
+    if (!music_initialized)
+        return false;
+    return DG_MusIsPlaying() != 0;
 }
 
-static void RPC_PollMusic(void) {}
+static void RPC_PollMusic(void)
+{
+    // Looping is handled on the host side.
+}
 
 static snddevice_t music_rpc_devices[] =
 {

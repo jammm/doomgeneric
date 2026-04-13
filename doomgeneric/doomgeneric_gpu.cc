@@ -108,6 +108,76 @@ uint32_t DG_SndPoll(void) {
   port.close();
   return mask;
 }
+
+uint32_t DG_MusRegister(void *data, int len) {
+  auto port = client.open<DOOM_MUS_REGISTER>();
+  uint32_t handle = 0;
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(len);
+  });
+  uint64_t slen = static_cast<uint64_t>(len);
+  port.send_n(&data, &slen);
+  port.recv([&](rpc::Buffer *buffer, uint32_t) {
+    handle = static_cast<uint32_t>(buffer->data[0]);
+  });
+  port.close();
+  return handle;
+}
+
+void DG_MusUnregister(uint32_t handle) {
+  auto port = client.open<DOOM_MUS_UNREGISTER>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(handle);
+  });
+  port.close();
+}
+
+void DG_MusPlay(uint32_t handle, int looping) {
+  auto port = client.open<DOOM_MUS_PLAY>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(handle);
+    buffer->data[1] = static_cast<uint64_t>(looping);
+  });
+  port.close();
+}
+
+void DG_MusStop(void) {
+  auto port = client.open<DOOM_MUS_STOP>();
+  port.send([](rpc::Buffer *, uint32_t) {});
+  port.close();
+}
+
+void DG_MusSetVolume(int volume) {
+  auto port = client.open<DOOM_MUS_VOLUME>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(volume);
+  });
+  port.close();
+}
+
+void DG_MusPause(void) {
+  auto port = client.open<DOOM_MUS_PAUSE>();
+  port.send([](rpc::Buffer *, uint32_t) {});
+  port.close();
+}
+
+void DG_MusResume(void) {
+  auto port = client.open<DOOM_MUS_RESUME>();
+  port.send([](rpc::Buffer *, uint32_t) {});
+  port.close();
+}
+
+int DG_MusIsPlaying(void) {
+  auto port = client.open<DOOM_MUS_IS_PLAYING>();
+  int playing = 0;
+  port.send_and_recv(
+      [](rpc::Buffer *, uint32_t) {},
+      [&](rpc::Buffer *buffer, uint32_t) {
+        playing = static_cast<int>(buffer->data[0]);
+      });
+  port.close();
+  return playing;
+}
 #endif // FEATURE_SOUND
 
 int main(int argc, char **argv, char **envp) {

@@ -579,6 +579,311 @@ static void init_sdl_audio() {
   SDL_PauseAudioDevice(audio_device, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Host-side music: MUS-to-MIDI converter + Windows MIDI playback
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+
+static uint32_t mus_next_handle = 1;
+static std::string mus_midi_path;
+static bool mus_playing = false;
+static bool mus_looping = false;
+static bool mus_paused = false;
+
+// Self-contained MUS-to-MIDI converter (ported from mus2mid.c).
+// Writes output into a std::vector<uint8_t>.
+
+struct MidiWriter {
+  std::vector<uint8_t> buf;
+  unsigned int tracksize = 0;
+  unsigned int queuedtime = 0;
+  uint8_t channelvelocities[16];
+  int channel_map[16];
+
+  void init() {
+    buf.clear();
+    tracksize = 0;
+    queuedtime = 0;
+    memset(channelvelocities, 127, sizeof(channelvelocities));
+    for (int i = 0; i < 16; i++) channel_map[i] = -1;
+  }
+
+  void write(const void *data, size_t len) {
+    auto p = reinterpret_cast<const uint8_t *>(data);
+    buf.insert(buf.end(), p, p + len);
+  }
+
+  void write8(uint8_t v) { buf.push_back(v); }
+
+  bool writeTime(unsigned int time) {
+    unsigned int buffer = time & 0x7F;
+    while ((time >>= 7) != 0) {
+      buffer <<= 8;
+      buffer |= ((time & 0x7F) | 0x80);
+    }
+    for (;;) {
+      write8(buffer & 0xFF);
+      tracksize++;
+      if (buffer & 0x80) buffer >>= 8;
+      else { queuedtime = 0; return false; }
+    }
+  }
+
+  void writeEvent2(uint8_t status, uint8_t d1) {
+    writeTime(queuedtime);
+    write8(status); write8(d1);
+    tracksize += 2;
+  }
+
+  void writeEvent3(uint8_t status, uint8_t d1, uint8_t d2) {
+    writeTime(queuedtime);
+    write8(status); write8(d1); write8(d2);
+    tracksize += 3;
+  }
+
+  int getMIDIChannel(int mus_ch) {
+    if (mus_ch == 15) return 9; // MUS percussion → MIDI percussion
+    if (channel_map[mus_ch] == -1) {
+      int max = -1;
+      for (int i = 0; i < 16; i++)
+        if (channel_map[i] > max) max = channel_map[i];
+      int result = max + 1;
+      if (result == 9) result++; // skip MIDI percussion channel
+      channel_map[mus_ch] = result;
+      // Send "all notes off" on first use
+      writeEvent3(0xB0 | result, 0x7B, 0);
+    }
+    return channel_map[mus_ch];
+  }
+};
+
+static const uint8_t mus_controller_map[] = {
+    0x00, 0x20, 0x01, 0x07, 0x0A, 0x0B, 0x5B, 0x5D,
+    0x40, 0x43, 0x78, 0x7B, 0x7E, 0x7F, 0x79
+};
+
+static bool mus_to_midi(const uint8_t *mus, int muslen,
+                        std::vector<uint8_t> &out) {
+  if (muslen < 16) return false;
+  if (memcmp(mus, "MUS\x1a", 4) != 0) return false;
+
+  int scorestart = mus[6] | (mus[7] << 8);
+  if (scorestart >= muslen) return false;
+
+  MidiWriter w;
+  w.init();
+
+  // MIDI header
+  static const uint8_t hdr[] = {
+      'M','T','h','d', 0,0,0,6, 0,0, 0,1, 0,0x46,
+      'M','T','r','k', 0,0,0,0
+  };
+  w.write(hdr, sizeof(hdr));
+
+  int pos = scorestart;
+  bool hitend = false;
+
+  while (!hitend && pos < muslen) {
+    while (!hitend && pos < muslen) {
+      uint8_t desc = mus[pos++];
+      int ch = w.getMIDIChannel(desc & 0x0F);
+      int event = desc & 0x70;
+
+      switch (event) {
+      case 0x00: { // release
+        if (pos >= muslen) return false;
+        uint8_t key = mus[pos++];
+        w.writeEvent3(0x80 | ch, key & 0x7F, 0);
+        break;
+      }
+      case 0x10: { // press
+        if (pos >= muslen) return false;
+        uint8_t key = mus[pos++];
+        if (key & 0x80) {
+          if (pos >= muslen) return false;
+          w.channelvelocities[ch] = mus[pos++] & 0x7F;
+        }
+        w.writeEvent3(0x90 | ch, key & 0x7F, w.channelvelocities[ch]);
+        break;
+      }
+      case 0x20: { // pitch bend
+        if (pos >= muslen) return false;
+        short wheel = (short)(mus[pos++]) * 64;
+        w.writeEvent3(0xE0 | ch, wheel & 0x7F, (wheel >> 7) & 0x7F);
+        break;
+      }
+      case 0x30: { // system event
+        if (pos >= muslen) return false;
+        uint8_t ctrl = mus[pos++];
+        if (ctrl < 10 || ctrl > 14) return false;
+        w.writeEvent3(0xB0 | ch, mus_controller_map[ctrl], 0);
+        break;
+      }
+      case 0x40: { // controller
+        if (pos + 1 >= muslen) return false;
+        uint8_t ctrl = mus[pos++];
+        uint8_t val = mus[pos++];
+        if (ctrl == 0) {
+          w.writeEvent2(0xC0 | ch, val & 0x7F);
+        } else {
+          if (ctrl < 1 || ctrl > 9) return false;
+          uint8_t v = val;
+          if (v & 0x80) v = 0x7F;
+          w.writeEvent3(0xB0 | ch, mus_controller_map[ctrl], v);
+        }
+        break;
+      }
+      case 0x60: // score end
+        hitend = true;
+        break;
+      default:
+        return false;
+      }
+
+      if (desc & 0x80) break; // last event in group
+    }
+    // Read time delay
+    if (!hitend && pos < muslen) {
+      unsigned int delay = 0;
+      for (;;) {
+        if (pos >= muslen) return false;
+        uint8_t b = mus[pos++];
+        delay = delay * 128 + (b & 0x7F);
+        if (!(b & 0x80)) break;
+      }
+      w.queuedtime += delay;
+    }
+  }
+
+  // End of track
+  w.writeTime(w.queuedtime);
+  w.write8(0xFF); w.write8(0x2F); w.write8(0x00);
+  w.tracksize += 3;
+
+  // Patch track size at offset 18
+  uint32_t ts = w.tracksize;
+  w.buf[18] = (ts >> 24) & 0xFF;
+  w.buf[19] = (ts >> 16) & 0xFF;
+  w.buf[20] = (ts >> 8) & 0xFF;
+  w.buf[21] = ts & 0xFF;
+
+  out = std::move(w.buf);
+  return true;
+}
+
+static std::string get_temp_midi_path() {
+  char tmp[MAX_PATH + 1];
+  GetTempPathA(MAX_PATH, tmp);
+  return std::string(tmp) + "doom_gpu_music.mid";
+}
+
+static void mus_mci_stop() {
+  mciSendStringA("stop doom_music", nullptr, 0, nullptr);
+  mciSendStringA("close doom_music", nullptr, 0, nullptr);
+  mus_playing = false;
+  mus_paused = false;
+}
+
+static uint32_t mus_register(const uint8_t *data, int len) {
+  mus_mci_stop();
+
+  std::vector<uint8_t> midi;
+  bool is_mid = (len > 4 && memcmp(data, "MThd", 4) == 0);
+
+  if (is_mid) {
+    midi.assign(data, data + len);
+  } else {
+    if (!mus_to_midi(data, len, midi)) {
+      fprintf(stderr, "[mus] MUS-to-MIDI conversion failed\n");
+      return 0;
+    }
+  }
+
+  mus_midi_path = get_temp_midi_path();
+  fprintf(stderr, "[mus] Writing MIDI to '%s' (%zu bytes)...\n",
+          mus_midi_path.c_str(), midi.size());
+  FILE *f = fopen(mus_midi_path.c_str(), "wb");
+  if (!f) {
+    fprintf(stderr, "[mus] Failed to write temp MIDI file (errno=%d)\n", errno);
+    return 0;
+  }
+  fwrite(midi.data(), 1, midi.size(), f);
+  fclose(f);
+
+  return mus_next_handle++;
+}
+
+static void mus_unregister(uint32_t handle) {
+  mus_mci_stop();
+  if (!mus_midi_path.empty()) {
+    remove(mus_midi_path.c_str());
+    mus_midi_path.clear();
+  }
+}
+
+static void mus_play(uint32_t handle, int looping) {
+  if (mus_midi_path.empty()) return;
+  mus_mci_stop();
+
+  std::string cmd = "open \"" + mus_midi_path + "\" type sequencer alias doom_music";
+  if (mciSendStringA(cmd.c_str(), nullptr, 0, nullptr) != 0) {
+    fprintf(stderr, "[mus] mciSendString open failed\n");
+    return;
+  }
+  if (mciSendStringA("play doom_music from 0", nullptr, 0, nullptr) != 0) {
+    fprintf(stderr, "[mus] mciSendString play failed\n");
+    return;
+  }
+  mus_playing = true;
+  mus_looping = (looping != 0);
+  mus_paused = false;
+}
+
+static void mus_stop() {
+  mus_mci_stop();
+}
+
+static void mus_set_volume(int vol) {
+  // MCI sequencer doesn't support setaudio volume; use midiOutSetVolume
+  // on the MIDI mapper device instead.
+  DWORD v = (DWORD)vol * 0xFFFF / 127;
+  DWORD stereo = v | (v << 16);
+  midiOutSetVolume(reinterpret_cast<HMIDIOUT>(static_cast<UINT_PTR>(MIDI_MAPPER)),
+                   stereo);
+}
+
+static void mus_pause() {
+  if (mus_playing && !mus_paused) {
+    mciSendStringA("pause doom_music", nullptr, 0, nullptr);
+    mus_paused = true;
+  }
+}
+
+static void mus_resume() {
+  if (mus_playing && mus_paused) {
+    mciSendStringA("resume doom_music", nullptr, 0, nullptr);
+    mus_paused = false;
+  }
+}
+
+static int mus_is_playing() {
+  if (!mus_playing) return 0;
+  char status[64] = {};
+  mciSendStringA("status doom_music mode", status, sizeof(status), nullptr);
+  if (strcmp(status, "stopped") == 0) {
+    if (mus_looping) {
+      mciSendStringA("play doom_music from 0", nullptr, 0, nullptr);
+      return 1;
+    }
+    mus_playing = false;
+    return 0;
+  }
+  return 1;
+}
+
+#endif // _WIN32
+
 template <uint32_t num_lanes, typename Alloc, typename Free>
 static uint32_t handle_server(rpc::Server &server, uint32_t index,
                               Alloc &&alloc, Free &&free) {
@@ -656,6 +961,64 @@ static uint32_t handle_server(rpc::Server &server, uint32_t index,
     });
     break;
   }
+#ifdef _WIN32
+  case DOOM_MUS_REGISTER: {
+    int mus_datalen = 0;
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      mus_datalen = static_cast<int>(buffer->data[0]);
+    });
+    uint64_t sizes[num_lanes] = {0};
+    void *bufs[num_lanes] = {nullptr};
+    auto temp_alloc = [](uint64_t sz) -> void * { return malloc(sz); };
+    port->recv_n(bufs, sizes, temp_alloc);
+    uint32_t h = 0;
+    if (bufs[0] && sizes[0] > 0)
+      h = mus_register((const uint8_t *)bufs[0], (int)sizes[0]);
+    for (uint32_t i = 0; i < num_lanes; i++)
+      ::free(bufs[i]);
+    port->send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(h);
+    });
+    break;
+  }
+  case DOOM_MUS_UNREGISTER: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      mus_unregister(static_cast<uint32_t>(buffer->data[0]));
+    });
+    break;
+  }
+  case DOOM_MUS_PLAY: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      mus_play(static_cast<uint32_t>(buffer->data[0]),
+               static_cast<int>(buffer->data[1]));
+    });
+    break;
+  }
+  case DOOM_MUS_STOP: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) { mus_stop(); });
+    break;
+  }
+  case DOOM_MUS_VOLUME: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      mus_set_volume(static_cast<int>(buffer->data[0]));
+    });
+    break;
+  }
+  case DOOM_MUS_PAUSE: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) { mus_pause(); });
+    break;
+  }
+  case DOOM_MUS_RESUME: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) { mus_resume(); });
+    break;
+  }
+  case DOOM_MUS_IS_PLAYING: {
+    port->recv_and_send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(mus_is_playing());
+    });
+    break;
+  }
+#endif // _WIN32
   case LIBC_EXIT: {
     port->recv_and_send([](rpc::Buffer *, uint32_t) {});
     port->recv([](rpc::Buffer *buffer, uint32_t) {
