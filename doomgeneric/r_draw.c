@@ -766,6 +766,126 @@ void R_DrawSpanLow (void)
     } while (count--);
 }
 
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+#include <gpuintrin.h>
+
+typedef struct {
+    int x, yl, yh;
+    fixed_t iscale, texturemid;
+    byte *source;
+    lighttable_t *colormap;
+} colcmd_t;
+
+typedef struct {
+    int y, x1, x2;
+    fixed_t xfrac, yfrac, xstep, ystep;
+    byte *source;
+    lighttable_t *colormap;
+} spancmd_t;
+
+#define MAX_COL_CMDS  4096
+#define MAX_SPAN_CMDS 8192
+
+static colcmd_t  col_cmds[MAX_COL_CMDS];
+static int       num_col_cmds;
+
+static spancmd_t span_cmds[MAX_SPAN_CMDS];
+static int       num_span_cmds;
+
+void R_DrawColumn_Deferred(void)
+{
+    if (num_col_cmds >= MAX_COL_CMDS) {
+	R_DrawColumn();
+	return;
+    }
+    colcmd_t *cmd = &col_cmds[num_col_cmds++];
+    cmd->x = dc_x;
+    cmd->yl = dc_yl;
+    cmd->yh = dc_yh;
+    cmd->iscale = dc_iscale;
+    cmd->texturemid = dc_texturemid;
+    cmd->source = dc_source;
+    cmd->colormap = dc_colormap;
+}
+
+void R_DrawSpan_Deferred(void)
+{
+    if (num_span_cmds >= MAX_SPAN_CMDS) {
+	R_DrawSpan();
+	return;
+    }
+    spancmd_t *cmd = &span_cmds[num_span_cmds++];
+    cmd->y = ds_y;
+    cmd->x1 = ds_x1;
+    cmd->x2 = ds_x2;
+    cmd->xfrac = ds_xfrac;
+    cmd->yfrac = ds_yfrac;
+    cmd->xstep = ds_xstep;
+    cmd->ystep = ds_ystep;
+    cmd->source = ds_source;
+    cmd->colormap = ds_colormap;
+}
+
+void R_ClearDrawCommands(void)
+{
+    num_col_cmds = 0;
+    num_span_cmds = 0;
+}
+
+static void R_ExecColumnCmd(colcmd_t *cmd)
+{
+    int count = cmd->yh - cmd->yl;
+    if (count < 0) return;
+
+    byte *dest = ylookup[cmd->yl] + columnofs[cmd->x];
+    fixed_t fracstep = cmd->iscale;
+    fixed_t frac = cmd->texturemid + (cmd->yl - centery) * fracstep;
+    byte *source = cmd->source;
+    lighttable_t *colormap = cmd->colormap;
+
+    do {
+	*dest = colormap[source[(frac >> FRACBITS) & 127]];
+	dest += SCREENWIDTH;
+	frac += fracstep;
+    } while (count--);
+}
+
+static void R_ExecSpanCmd(spancmd_t *cmd)
+{
+    unsigned int position = ((cmd->xfrac << 10) & 0xffff0000)
+			  | ((cmd->yfrac >> 6)  & 0x0000ffff);
+    unsigned int step = ((cmd->xstep << 10) & 0xffff0000)
+		      | ((cmd->ystep >> 6)  & 0x0000ffff);
+
+    byte *dest = ylookup[cmd->y] + columnofs[cmd->x1];
+    int count = cmd->x2 - cmd->x1;
+    byte *source = cmd->source;
+    lighttable_t *colormap = cmd->colormap;
+
+    do {
+	unsigned int ytemp = (position >> 4) & 0x0fc0;
+	unsigned int xtemp = (position >> 26);
+	*dest++ = colormap[source[xtemp | ytemp]];
+	position += step;
+    } while (count--);
+}
+
+void R_ExecuteDrawCommands(void)
+{
+    uint32_t tid = __gpu_thread_id(0);
+    uint32_t nthreads = __gpu_num_threads(0);
+    int total = num_col_cmds + num_span_cmds;
+
+    for (int i = tid; i < total; i += nthreads) {
+	if (i < num_col_cmds)
+	    R_ExecColumnCmd(&col_cmds[i]);
+	else
+	    R_ExecSpanCmd(&span_cmds[i - num_col_cmds]);
+    }
+}
+
+#endif /* __AMDGPU__ || __NVPTX__ */
+
 //
 // R_InitBuffer 
 // Creats lookup tables that avoid

@@ -25,6 +25,9 @@
 #include <stdlib.h>
 #include <math.h>
 
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+#include <gpuintrin.h>
+#endif
 
 #include "doomdef.h"
 #include "d_loop.h"
@@ -861,31 +864,55 @@ void R_SetupFrame (player_t* player)
 // R_RenderView
 //
 void R_RenderPlayerView (player_t* player)
-{	
-    R_SetupFrame (player);
+{
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+    if (__gpu_thread_id(0) == 0)
+    {
+	R_SetupFrame (player);
+	R_ClearClipSegs ();
+	R_ClearDrawSegs ();
+	R_ClearPlanes ();
+	R_ClearSprites ();
+	NetUpdate ();
 
-    // Clear buffers.
+	R_ClearDrawCommands ();
+	void (*saved_basecolfunc)(void) = basecolfunc;
+	void (*saved_colfunc)(void) = colfunc;
+	void (*saved_spanfunc)(void) = spanfunc;
+	basecolfunc = colfunc = R_DrawColumn_Deferred;
+	spanfunc = R_DrawSpan_Deferred;
+
+	R_RenderBSPNode (numnodes-1);
+	NetUpdate ();
+	R_DrawPlanes ();
+	NetUpdate ();
+
+	basecolfunc = saved_basecolfunc;
+	colfunc = saved_colfunc;
+	spanfunc = saved_spanfunc;
+    }
+
+    __gpu_sync_threads ();
+    R_ExecuteDrawCommands ();
+    __gpu_sync_threads ();
+
+    if (__gpu_thread_id(0) == 0)
+    {
+	R_DrawMasked ();
+	NetUpdate ();
+    }
+#else
+    R_SetupFrame (player);
     R_ClearClipSegs ();
     R_ClearDrawSegs ();
     R_ClearPlanes ();
     R_ClearSprites ();
-    
-    // check for new console commands.
     NetUpdate ();
-
-    // The head node is the last node output.
     R_RenderBSPNode (numnodes-1);
-    
-    // Check for new console commands.
     NetUpdate ();
-    
     R_DrawPlanes ();
-    
-    // Check for new console commands.
     NetUpdate ();
-    
     R_DrawMasked ();
-
-    // Check for new console commands.
-    NetUpdate ();				
+    NetUpdate ();
+#endif
 }

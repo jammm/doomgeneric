@@ -99,6 +99,12 @@ void R_FillBackScreen (void);
 // If the view size is not full screen, draws a border around it.
 void R_DrawViewBorder (void);
 
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+void    R_DrawColumn_Deferred (void);
+void    R_DrawSpan_Deferred (void);
+void    R_ClearDrawCommands (void);
+void    R_ExecuteDrawCommands (void);
+#endif
 
 
 #endif

@@ -183,6 +183,7 @@ void D_Display (void)
     static int __gpu_local wipestart __attribute__((loader_uninitialized));
     static boolean __gpu_local wipe __attribute__((loader_uninitialized));
     static boolean __gpu_local done __attribute__((loader_uninitialized));
+    static boolean __gpu_local do_3d_render __attribute__((loader_uninitialized));
 #else
     int wipestart;
     boolean wipe;
@@ -247,10 +248,24 @@ void D_Display (void)
       
       // draw buffered stuff to screen
       I_UpdateNoBlit ();
-      
+
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+      do_3d_render = (gamestate == GS_LEVEL && !automapactive && gametic);
+    }
+
+    // All threads participate in 3D rendering (R_RenderPlayerView has
+    // internal sync points for parallel wall/floor drawing).
+    __gpu_sync_threads();
+
+    if (do_3d_render)
+      R_RenderPlayerView (&players[displayplayer]);
+
+    if (__gpu_thread_id(0) == 0) {
+#else
       // draw the view directly
       if (gamestate == GS_LEVEL && !automapactive && gametic)
         R_RenderPlayerView (&players[displayplayer]);
+#endif
 
       if (gamestate == GS_LEVEL && gametic)
         HU_Drawer ();
