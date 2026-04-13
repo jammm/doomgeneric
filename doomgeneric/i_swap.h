@@ -20,7 +20,7 @@
 #ifndef __I_SWAP__
 #define __I_SWAP__
 
-#ifdef FEATURE_SOUND
+#if defined(FEATURE_SOUND) && !defined(__AMDGPU__) && !defined(__NVPTX__)
 
 
 #ifdef __DJGPP__
@@ -72,14 +72,14 @@
 #endif  // __DJGPP__
 
 
-#else  // FEATURE_SOUND
+#else  // FEATURE_SOUND (or GPU target)
 	
 #define SHORT(x)  ((signed short) (x))
 #define LONG(x)   ((signed int) (x))
 
 #define SYS_LITTLE_ENDIAN
 
-#endif /* FEATURE_SOUND */
+#endif
 
 #endif
 

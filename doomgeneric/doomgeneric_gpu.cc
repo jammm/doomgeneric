@@ -62,6 +62,54 @@ int DG_GetKey(int *pressed, unsigned char *doomKey) {
 
 void DG_SetWindowTitle(const char *title) {}
 
+#ifdef FEATURE_SOUND
+int DG_SndStart(int lumpnum, void *data, int datalen,
+                int channel, int vol, int sep) {
+  auto port = client.open<DOOM_SND_START>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(lumpnum);
+    buffer->data[1] = static_cast<uint64_t>(channel);
+    buffer->data[2] = static_cast<uint64_t>(vol);
+    buffer->data[3] = static_cast<uint64_t>(sep);
+    buffer->data[4] = static_cast<uint64_t>(datalen);
+  });
+  if (datalen > 0 && data) {
+    uint64_t len = static_cast<uint64_t>(datalen);
+    port.send_n(&data, &len);
+  }
+  port.close();
+  return channel;
+}
+
+void DG_SndStop(int channel) {
+  auto port = client.open<DOOM_SND_STOP>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(channel);
+  });
+  port.close();
+}
+
+void DG_SndUpdateParams(int channel, int vol, int sep) {
+  auto port = client.open<DOOM_SND_UPDATE>();
+  port.send([&](rpc::Buffer *buffer, uint32_t) {
+    buffer->data[0] = static_cast<uint64_t>(channel);
+    buffer->data[1] = static_cast<uint64_t>(vol);
+    buffer->data[2] = static_cast<uint64_t>(sep);
+  });
+  port.close();
+}
+
+uint32_t DG_SndPoll(void) {
+  auto port = client.open<DOOM_SND_POLL>();
+  uint32_t mask = 0;
+  port.send_and_recv(
+      [](rpc::Buffer *, uint32_t) {},
+      [&](rpc::Buffer *buffer, uint32_t) { mask = (uint32_t)buffer->data[0]; });
+  port.close();
+  return mask;
+}
+#endif // FEATURE_SOUND
+
 int main(int argc, char **argv, char **envp) {
   if (__gpu_thread_id(0) == 0)
     doomgeneric_Create(argc, argv);

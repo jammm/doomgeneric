@@ -13,7 +13,11 @@
 #endif // DOOMGENERIC_RESY
 
 #define DOOM_DRAW_BUFFER ('d' << 24 | 0)
-#define DOOM_GET_INPUT ('d' << 24 | 1)
+#define DOOM_GET_INPUT   ('d' << 24 | 1)
+#define DOOM_SND_START   ('d' << 24 | 2)
+#define DOOM_SND_STOP    ('d' << 24 | 3)
+#define DOOM_SND_UPDATE  ('d' << 24 | 4)
+#define DOOM_SND_POLL    ('d' << 24 | 5)
 
 #ifdef CMAP256
 
@@ -41,6 +45,14 @@ void DG_SleepMs(uint32_t ms);
 uint32_t DG_GetTicksMs();
 int DG_GetKey(int *pressed, unsigned char *key);
 void DG_SetWindowTitle(const char *title);
+
+#ifdef FEATURE_SOUND
+int DG_SndStart(int lumpnum, void *data, int datalen,
+                int channel, int vol, int sep);
+void DG_SndStop(int channel);
+void DG_SndUpdateParams(int channel, int vol, int sep);
+uint32_t DG_SndPoll(void);
+#endif
 
 #ifdef __cplusplus
 }

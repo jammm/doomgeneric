@@ -22,7 +22,7 @@ set(GPU_CFLAGS
   -fno-builtin-printf
   -mllvm -amdgpu-function-calls=false
   -Wall
-  -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE
+  -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE -DFEATURE_SOUND
   -I${LLVM_SOURCE}/libc
   -I${LLVM_DIR}/include
   -isystem${CMAKE_BINARY_DIR}/gpu_libc_install/include
@@ -43,6 +43,7 @@ set(GPU_C_SOURCES
   sounds.c statdump.c st_lib.c st_stuff.c s_sound.c tables.c v_video.c
   wi_stuff.c w_checksum.c w_file.c w_main.c w_wad.c z_zone.c
   w_file_stdc.c i_input.c i_video.c doomgeneric.c
+  i_rpcsound.c i_rpcmusic.c
 )
 
 set(GPU_CC_SOURCES

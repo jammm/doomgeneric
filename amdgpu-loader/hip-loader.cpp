@@ -22,8 +22,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include "win_compat.h"
 
@@ -312,7 +314,7 @@ static unsigned char convertToDoomKey(unsigned int key) {
 }
 
 static void init_sdl_windows() {
-  if (SDL_Init(SDL_INIT_VIDEO))
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO))
     handle_error(SDL_GetError());
 
   window =
@@ -408,6 +410,175 @@ static void sdl_draw(void *buffer_ptr) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Host-side software audio mixer
+// ---------------------------------------------------------------------------
+
+#define SND_NUM_CHANNELS 16
+#define SND_OUTPUT_RATE 44100
+
+struct CachedSound {
+  int16_t *samples;   // converted to signed 16-bit
+  int length;         // number of samples
+  int sample_rate;
+};
+
+struct SoundChannel {
+  bool active;
+  const CachedSound *sound;
+  int position;       // current sample offset (in output sample rate space)
+  int vol_left;       // 0-255
+  int vol_right;      // 0-255
+  int sample_rate;    // source sample rate for resampling
+};
+
+static std::unordered_map<int, CachedSound> sfx_cache;
+static SoundChannel snd_channels[SND_NUM_CHANNELS];
+static std::mutex snd_mutex;
+static SDL_AudioDeviceID audio_device;
+
+static void audio_callback(void *userdata, Uint8 *stream, int len) {
+  int16_t *out = reinterpret_cast<int16_t *>(stream);
+  int total_samples = len / sizeof(int16_t);  // stereo interleaved
+  int frames = total_samples / 2;
+
+  memset(stream, 0, len);
+
+  std::lock_guard<std::mutex> lock(snd_mutex);
+  for (int ch = 0; ch < SND_NUM_CHANNELS; ch++) {
+    SoundChannel &c = snd_channels[ch];
+    if (!c.active || !c.sound)
+      continue;
+
+    const CachedSound *snd = c.sound;
+    for (int i = 0; i < frames; i++) {
+      // Resample from source rate to output rate using nearest-neighbor
+      int src_pos = (int)((int64_t)c.position * snd->sample_rate / SND_OUTPUT_RATE);
+      if (src_pos >= snd->length) {
+        c.active = false;
+        break;
+      }
+      int32_t sample = snd->samples[src_pos];
+      int32_t left  = (sample * c.vol_left)  / 255;
+      int32_t right = (sample * c.vol_right) / 255;
+      // Saturating add
+      int32_t cur_l = out[i * 2]     + left;
+      int32_t cur_r = out[i * 2 + 1] + right;
+      if (cur_l > 32767) cur_l = 32767; else if (cur_l < -32768) cur_l = -32768;
+      if (cur_r > 32767) cur_r = 32767; else if (cur_r < -32768) cur_r = -32768;
+      out[i * 2]     = (int16_t)cur_l;
+      out[i * 2 + 1] = (int16_t)cur_r;
+      c.position++;
+    }
+  }
+}
+
+// Parse a DMX sound lump (8-byte header + unsigned 8-bit PCM) and cache it.
+static void cache_dmx_sound(int lumpnum, const uint8_t *data, int datalen) {
+  if (sfx_cache.count(lumpnum))
+    return;
+
+  if (datalen < 8 || data[0] != 0x03 || data[1] != 0x00) {
+    fprintf(stderr, "[snd] Invalid DMX header for lump %d\n", lumpnum);
+    return;
+  }
+
+  int sample_rate = data[2] | (data[3] << 8);
+  int num_samples = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+
+  if (num_samples <= 0 || 8 + num_samples > datalen)
+    num_samples = datalen - 8;
+  if (num_samples <= 0)
+    return;
+
+  // Strip the 16-sample padding at start and end that DMX format adds
+  int pad = (num_samples > 32) ? 16 : 0;
+  const uint8_t *pcm = data + 8 + pad;
+  int actual_samples = num_samples - 2 * pad;
+  if (actual_samples <= 0) {
+    pcm = data + 8;
+    actual_samples = num_samples;
+  }
+
+  // Convert unsigned 8-bit to signed 16-bit
+  int16_t *converted = (int16_t *)malloc(actual_samples * sizeof(int16_t));
+  for (int i = 0; i < actual_samples; i++)
+    converted[i] = ((int)pcm[i] - 128) << 8;
+
+  CachedSound cs;
+  cs.samples = converted;
+  cs.length = actual_samples;
+  cs.sample_rate = sample_rate > 0 ? sample_rate : 11025;
+  sfx_cache[lumpnum] = cs;
+}
+
+// Compute left/right volume from DOOM's vol (0-127) and sep (0-254, 127=center).
+static void compute_stereo_vol(int vol, int sep, int &left, int &right) {
+  // sep: 0 = full left, 127 = center, 254 = full right
+  left  = ((254 - sep) * vol) / 127;
+  right = (sep * vol) / 127;
+  if (left  > 255) left  = 255;
+  if (right > 255) right = 255;
+}
+
+static void snd_start(int lumpnum, int channel, int vol, int sep) {
+  if (channel < 0 || channel >= SND_NUM_CHANNELS)
+    return;
+  auto it = sfx_cache.find(lumpnum);
+  if (it == sfx_cache.end())
+    return;
+
+  std::lock_guard<std::mutex> lock(snd_mutex);
+  SoundChannel &c = snd_channels[channel];
+  c.active = true;
+  c.sound = &it->second;
+  c.position = 0;
+  c.sample_rate = it->second.sample_rate;
+  compute_stereo_vol(vol, sep, c.vol_left, c.vol_right);
+}
+
+static void snd_stop(int channel) {
+  if (channel < 0 || channel >= SND_NUM_CHANNELS)
+    return;
+  std::lock_guard<std::mutex> lock(snd_mutex);
+  snd_channels[channel].active = false;
+}
+
+static void snd_update(int channel, int vol, int sep) {
+  if (channel < 0 || channel >= SND_NUM_CHANNELS)
+    return;
+  std::lock_guard<std::mutex> lock(snd_mutex);
+  compute_stereo_vol(vol, sep, snd_channels[channel].vol_left,
+                     snd_channels[channel].vol_right);
+}
+
+static uint32_t snd_poll() {
+  std::lock_guard<std::mutex> lock(snd_mutex);
+  uint32_t mask = 0;
+  for (int i = 0; i < SND_NUM_CHANNELS; i++)
+    if (snd_channels[i].active)
+      mask |= (1u << i);
+  return mask;
+}
+
+static void init_sdl_audio() {
+  SDL_AudioSpec want = {}, have = {};
+  want.freq = SND_OUTPUT_RATE;
+  want.format = AUDIO_S16SYS;
+  want.channels = 2;
+  want.samples = 1024;
+  want.callback = audio_callback;
+
+  audio_device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+  if (audio_device == 0) {
+    fprintf(stderr, "[snd] Failed to open audio device: %s\n", SDL_GetError());
+    return;
+  }
+  fprintf(stderr, "[snd] Audio device opened: %d Hz, %d ch, %d samples\n",
+          have.freq, have.channels, have.samples);
+  SDL_PauseAudioDevice(audio_device, 0);
+}
+
 template <uint32_t num_lanes, typename Alloc, typename Free>
 static uint32_t handle_server(rpc::Server &server, uint32_t index,
                               Alloc &&alloc, Free &&free) {
@@ -439,6 +610,49 @@ static uint32_t handle_server(rpc::Server &server, uint32_t index,
   case DOOM_GET_INPUT: {
     port->recv_and_send([&](rpc::Buffer *buffer, uint32_t) {
       buffer->data[0] = sdl_get_input();
+    });
+    break;
+  }
+  case DOOM_SND_START: {
+    int snd_lumpnum = 0, snd_channel = 0, snd_vol = 0, snd_sep = 0;
+    int snd_datalen = 0;
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      snd_lumpnum = static_cast<int>(buffer->data[0]);
+      snd_channel = static_cast<int>(buffer->data[1]);
+      snd_vol     = static_cast<int>(buffer->data[2]);
+      snd_sep     = static_cast<int>(buffer->data[3]);
+      snd_datalen = static_cast<int>(buffer->data[4]);
+    });
+    if (snd_datalen > 0) {
+      uint64_t sizes[num_lanes] = {0};
+      void *bufs[num_lanes] = {nullptr};
+      auto temp_alloc = [](uint64_t sz) -> void * { return malloc(sz); };
+      port->recv_n(bufs, sizes, temp_alloc);
+      if (bufs[0] && sizes[0] > 0)
+        cache_dmx_sound(snd_lumpnum, (const uint8_t *)bufs[0], (int)sizes[0]);
+      for (uint32_t i = 0; i < num_lanes; i++)
+        ::free(bufs[i]);
+    }
+    snd_start(snd_lumpnum, snd_channel, snd_vol, snd_sep);
+    break;
+  }
+  case DOOM_SND_STOP: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      snd_stop(static_cast<int>(buffer->data[0]));
+    });
+    break;
+  }
+  case DOOM_SND_UPDATE: {
+    port->recv([&](rpc::Buffer *buffer, uint32_t) {
+      snd_update(static_cast<int>(buffer->data[0]),
+                 static_cast<int>(buffer->data[1]),
+                 static_cast<int>(buffer->data[2]));
+    });
+    break;
+  }
+  case DOOM_SND_POLL: {
+    port->recv_and_send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = snd_poll();
     });
     break;
   }
@@ -931,6 +1145,7 @@ int main(int argc, char **argv) {
 
   fprintf(stderr, "[main] Initializing SDL...\n");
   init_sdl_windows();
+  init_sdl_audio();
   fprintf(stderr, "[main] SDL initialized\n");
 
   LaunchParameters params{threads_x, threads_y, threads_z,
