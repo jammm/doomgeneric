@@ -67,3 +67,14 @@ target_compile_options(hip-loader PRIVATE -fno-stack-protector)
 set_target_properties(hip-loader PROPERTIES LINK_FLAGS "-Wl,/subsystem:console")
 add_dependencies(hip-loader doomgeneric_gpu)
 
+# Copy vendored shared library DLLs beside hip-loader.exe after build
+if(WIN32)
+  add_custom_command(TARGET hip-loader POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_FILE:SDL2>" "$<TARGET_FILE_DIR:hip-loader>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_FILE:SDL2_mixer>" "$<TARGET_FILE_DIR:hip-loader>"
+    COMMENT "Copying SDL2.dll and SDL2_mixer.dll beside hip-loader.exe"
+  )
+endif()
+
