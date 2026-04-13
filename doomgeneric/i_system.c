@@ -463,13 +463,9 @@ void I_Error (char *error, ...)
     // abort();
 #if ORIGCODE
     SDL_Quit();
+#endif
 
     exit(-1);
-#else
-    while (true)
-    {
-    }
-#endif
 }
 
 //

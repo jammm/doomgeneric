@@ -305,6 +305,8 @@ void D_Display (void)
       // menus go directly to the screen
       M_Drawer ();          // menu is drawn even on top of everything
       NetUpdate ();         // send out any new accumulation
+
+      I_FPS_Drawer();
     }
 
     __gpu_sync_threads();
@@ -426,7 +428,9 @@ void doomgeneric_Tick()
       // frame syncronous IO operations
       I_StartFrame ();
 
+      I_FPS_TickStart();
       TryRunTics (); // will run at least one tic
+      I_FPS_TickEnd();
 
       S_UpdateSounds (players[consoleplayer].mo);// move positional sounds
     }

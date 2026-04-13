@@ -119,6 +119,11 @@ void I_SetGrabMouseCallback(grabmouse_callback_t func);
 void I_DisplayFPSDots(boolean dots_on);
 void I_BindVideoVariables(void);
 
+extern int fps_overlay;    // 0=off, 1=fps only, 2=advanced telemetry
+void I_FPS_Drawer(void);
+void I_FPS_TickStart(void);
+void I_FPS_TickEnd(void);
+
 void I_InitWindowTitle(void);
 void I_InitWindowIcon(void);
 

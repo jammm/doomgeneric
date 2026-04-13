@@ -13,7 +13,15 @@
 [[gnu::visibility("protected")]] extern rpc::Client
     client asm("__llvm_rpc_client");
 
-void DG_Init() {}
+// Host-allocated coherent buffer for zero-copy screen output.
+// Set by the loader before _begin runs; if non-null, DG_Init overrides
+// the malloc'd DG_ScreenBuffer so frame data goes straight to host memory.
+[[gnu::visibility("protected")]] void *__dg_screen_buffer = nullptr;
+
+void DG_Init() {
+  if (__dg_screen_buffer)
+    DG_ScreenBuffer = reinterpret_cast<pixel_t *>(__dg_screen_buffer);
+}
 
 void DG_DrawFrame() {
   auto port = client.open<DOOM_DRAW_BUFFER>();

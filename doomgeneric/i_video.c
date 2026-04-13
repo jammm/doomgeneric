@@ -37,10 +37,16 @@ rcsid[] = "$Id: i_x.c,v 1.6 1997/02/03 22:45:10 b1 Exp $";
 #include "doomkeys.h"
 
 #include "doomgeneric.h"
+#include "hu_stuff.h"
+#include "i_swap.h"
 
 #include <stdbool.h>
+#include <ctype.h>
 #include <gpuintrin.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+extern patch_t *hu_font[HU_FONTSIZE];
 
 #if !defined(__AMDGPU__) && !defined(__NVPTX__)
 #include <fcntl.h>
@@ -190,6 +196,38 @@ void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels)
     }
 }
 
+// Single-thread version: one thread processes an entire row.
+// Used by the 2D-parallel I_FinishUpdate where each thread owns full rows.
+void cmap_to_fb_single(uint8_t *out, uint8_t *in, int in_pixels)
+{
+    int i, j, k;
+    struct color c;
+    uint32_t pix;
+    uint16_t r, g, b;
+    uint32_t bytes_pp = s_Fb.bits_per_pixel / 8;
+
+    for (i = 0; i < in_pixels; i++)
+    {
+        c = colors[in[i]];
+        r = (uint16_t) (c.r >> (8 - s_Fb.red.length));
+        g = (uint16_t) (c.g >> (8 - s_Fb.green.length));
+        b = (uint16_t) (c.b >> (8 - s_Fb.blue.length));
+        pix = r << s_Fb.red.offset;
+        pix |= g << s_Fb.green.offset;
+        pix |= b << s_Fb.blue.offset;
+
+        uint8_t *out_current = out + i * fb_scaling * bytes_pp;
+        for (k = 0; k < fb_scaling; k++)
+        {
+            for (j = 0; j < bytes_pp; j++)
+            {
+                *out_current = (pix >> (j * 8));
+                out_current++;
+            }
+        }
+    }
+}
+
 void I_InitGraphics (void)
 {
     int i;
@@ -270,60 +308,151 @@ void I_UpdateNoBlit (void)
 {
 }
 
+// ---------------------------------------------------------------------------
+// On-screen performance overlay
+// ---------------------------------------------------------------------------
+
+int fps_overlay = 1;       // 0=off, 1=fps only, 2=advanced telemetry
+
+static uint32_t fps_frame_count;
+static uint32_t fps_last_time;
+static uint32_t fps_last_tick_start;
+static uint32_t fps_display_fps;
+static uint32_t fps_display_frametime;  // in tenths of ms
+static uint32_t fps_display_ticktime;   // in tenths of ms
+static uint32_t fps_tick_accum;         // accumulated tick time for averaging
+static uint32_t fps_tick_samples;
+
+void I_FPS_TickStart(void)
+{
+    fps_last_tick_start = DG_GetTicksMs();
+}
+
+void I_FPS_TickEnd(void)
+{
+    if (fps_last_tick_start) {
+        uint32_t elapsed = DG_GetTicksMs() - fps_last_tick_start;
+        fps_tick_accum += elapsed;
+        fps_tick_samples++;
+    }
+}
+
+static void I_FPS_Update(void)
+{
+    uint32_t now = DG_GetTicksMs();
+
+    fps_frame_count++;
+
+    if (fps_last_time == 0) {
+        fps_last_time = now;
+        return;
+    }
+
+    uint32_t elapsed = now - fps_last_time;
+    if (elapsed >= 500) {
+        fps_display_fps = (fps_frame_count * 10000) / (elapsed * 10);
+        fps_display_frametime = (elapsed * 10) / fps_frame_count;
+        if (fps_tick_samples > 0)
+            fps_display_ticktime = (fps_tick_accum * 10) / fps_tick_samples;
+        else
+            fps_display_ticktime = 0;
+        fps_frame_count = 0;
+        fps_last_time = now;
+        fps_tick_accum = 0;
+        fps_tick_samples = 0;
+    }
+}
+
+static int I_FPS_StringWidth(const char *s)
+{
+    int w = 0;
+    while (*s) {
+        int c = toupper((int)*s++) - HU_FONTSTART;
+        if (c < 0 || c >= HU_FONTSIZE)
+            w += 4;
+        else
+            w += SHORT(hu_font[c]->width);
+    }
+    return w;
+}
+
+static void I_FPS_DrawString(int x, int y, const char *s)
+{
+    while (*s) {
+        int c = toupper((int)*s++) - HU_FONTSTART;
+        if (c < 0 || c >= HU_FONTSIZE) {
+            x += 4;
+            continue;
+        }
+        if (x + SHORT(hu_font[c]->width) > SCREENWIDTH)
+            break;
+        V_DrawPatchDirect(x, y, hu_font[c]);
+        x += SHORT(hu_font[c]->width);
+    }
+}
+
+void I_FPS_Drawer(void)
+{
+    if (!fps_overlay || !hu_font[0])
+        return;
+
+    I_FPS_Update();
+
+    if (fps_display_fps == 0 && fps_display_frametime == 0)
+        return;
+
+    char buf[64];
+    int y = 2;
+    int x;
+
+    snprintf(buf, sizeof(buf), "%u FPS", fps_display_fps);
+    x = SCREENWIDTH - I_FPS_StringWidth(buf) - 2;
+    I_FPS_DrawString(x, y, buf);
+
+    if (fps_overlay >= 2) {
+        y += 10;
+        snprintf(buf, sizeof(buf), "%u.%u MS",
+                 fps_display_frametime / 10, fps_display_frametime % 10);
+        x = SCREENWIDTH - I_FPS_StringWidth(buf) - 2;
+        I_FPS_DrawString(x, y, buf);
+
+        y += 10;
+        snprintf(buf, sizeof(buf), "TICK %u.%u MS",
+                 fps_display_ticktime / 10, fps_display_ticktime % 10);
+        x = SCREENWIDTH - I_FPS_StringWidth(buf) - 2;
+        I_FPS_DrawString(x, y, buf);
+    }
+}
+
 //
 // I_FinishUpdate
 //
 
 void I_FinishUpdate ()
 {
-    int y;
-    int x_offset, y_offset, x_offset_end;
-    unsigned char *line_in, *line_out;
+    int x_offset, x_offset_end;
 
-    /* Offsets in case FB is bigger than DOOM */
-    /* 600 = s_Fb heigt, 200 screenheight */
-    /* 600 = s_Fb heigt, 200 screenheight */
-    /* 2048 =s_Fb width, 320 screenwidth */
-    y_offset     = (((s_Fb.yres - (SCREENHEIGHT * fb_scaling)) * s_Fb.bits_per_pixel/8)) / 2;
-    x_offset     = (((s_Fb.xres - (SCREENWIDTH  * fb_scaling)) * s_Fb.bits_per_pixel/8)) / 2; // XXX: siglent FB hack: /4 instead of /2, since it seems to handle the resolution in a funny way
-    //x_offset     = 0;
-    x_offset_end = ((s_Fb.xres - (SCREENWIDTH  * fb_scaling)) * s_Fb.bits_per_pixel/8) - x_offset;
+    uint32_t bytes_pp = s_Fb.bits_per_pixel / 8;
+    x_offset     = (((s_Fb.xres - (SCREENWIDTH  * fb_scaling)) * bytes_pp)) / 2;
+    x_offset_end = ((s_Fb.xres - (SCREENWIDTH  * fb_scaling)) * bytes_pp) - x_offset;
+    int out_stride = SCREENWIDTH * fb_scaling * bytes_pp + x_offset + x_offset_end;
 
-    /* DRAW SCREEN */
-    line_in  = (unsigned char *) I_VideoBuffer;
-    line_out = (unsigned char *) DG_ScreenBuffer;
+    unsigned char *base_in  = (unsigned char *) I_VideoBuffer;
+    unsigned char *base_out = (unsigned char *) DG_ScreenBuffer;
 
-    y = SCREENHEIGHT;
+    int total_out_rows = SCREENHEIGHT * fb_scaling;
+    uint32_t tid = __gpu_thread_id(0);
+    uint32_t nthreads = __gpu_num_threads(0);
 
-    while (y--)
-    {
-        int i;
-        for (i = 0; i < fb_scaling; i++) {
-            line_out += x_offset;
-#ifdef CMAP256
-            if (fb_scaling == 1) {
-                memcpy(line_out, line_in, SCREENWIDTH); /* fb_width is bigger than Doom SCREENWIDTH... */
-            } else {
-                int j;
-
-                for (j = 0; j < SCREENWIDTH; j++) {
-                    int k;
-                    for (k = 0; k < fb_scaling; k++) {
-                        line_out[j * fb_scaling + k] = line_in[j];
-                    }
-                }
-            }
-#else
-            //cmap_to_rgb565((void*)line_out, (void*)line_in, SCREENWIDTH);
-            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH);
-#endif
-            line_out += (SCREENWIDTH * fb_scaling * (s_Fb.bits_per_pixel/8)) + x_offset_end;
-        }
-        line_in += SCREENWIDTH;
+    for (int row = tid; row < total_out_rows; row += nthreads) {
+        int src_y = row / fb_scaling;
+        unsigned char *line_in = base_in + src_y * SCREENWIDTH;
+        unsigned char *line_out = base_out + row * out_stride + x_offset;
+        cmap_to_fb_single(line_out, line_in, SCREENWIDTH);
     }
 
     __gpu_sync_threads();
-    if (__gpu_thread_id(0) == 0)
+    if (tid == 0)
       DG_DrawFrame();
 }
 
