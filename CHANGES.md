@@ -123,8 +123,27 @@ of returning the file position. DOOM calls `ftell` in `M_FileLength`,
   architecture overview, key source files, and known issues/constraints
 - `CHANGES.md` -- This file
 
+## Audio
+
+### Sound effects (`hip-loader.cpp`)
+DMX sound lumps are converted to WAV in memory and loaded as
+`Mix_Chunk` objects via `Mix_LoadWAV_RW`. Playback uses
+`Mix_PlayChannel` with per-channel volume and stereo panning
+(`Mix_SetPanning`).
+
+### Music (`hip-loader.cpp`, `i_rpcmusic.c`)
+MUS lump data is sent from the GPU to the host via RPC. The host
+converts MUS to MIDI using an embedded converter, writes a temp `.mid`
+file, and plays it via `Mix_LoadMUS` / `Mix_PlayMusic`. On Windows
+this uses native MIDI (wavetable synth via winmm); on Linux it falls
+back to Timidity (built into SDL_mixer).
+
+Volume, pause, resume, and looping are all forwarded via RPC opcodes
+(`DOOM_MUS_VOLUME`, `DOOM_MUS_PAUSE`, etc.).
+
 ## Third-party Dependencies
 
 - `third_party/SDL` -- SDL2 (git submodule)
+- `third_party/SDL_mixer` -- SDL2_mixer 2.9.0 (MIDI-only config, zlib license)
 - `third_party/zlib` -- zlib (git submodule)
 - `third_party/zstd` -- zstd (git submodule)

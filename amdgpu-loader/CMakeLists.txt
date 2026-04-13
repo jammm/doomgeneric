@@ -46,7 +46,7 @@ target_include_directories(hip-loader PRIVATE
   ${CMAKE_SOURCE_DIR}/doomgeneric
 )
 
-target_link_libraries(hip-loader PRIVATE SDL2::SDL2)
+target_link_libraries(hip-loader PRIVATE SDL2::SDL2 SDL2_mixer::SDL2_mixer)
 target_link_libraries(hip-loader PRIVATE "${ROCM_CORE_DIR}/lib/amdhip64.lib")
 
 foreach(lib ${LLVM_LIBS})

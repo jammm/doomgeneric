@@ -11,13 +11,38 @@ This implementation works on NVIDIA as well as AMDGPU. To use the NVIDIA
 implementation perform the same steps but with the `nvptx` loader and make
 target.
 
+# Windows port
+
+This fork adds Windows support using HIP on AMD RDNA GPUs. Key changes:
+
+* **CMake build system** replacing Makefiles, using clang-cl + lld-link
+  with the ROCm SDK from [TheRock](https://github.com/ROCm/TheRock) Python wheels
+* **HIP-based loader** (`hip-loader.exe`) that loads the GPU ELF binary,
+  manages shared memory, and services GPU libc RPC calls from the host
+* **Parallel software renderer** distributing output rows across GPU threads
+  (256 default), achieving ~70 FPS at 1280x800
+* **Sound effects** via SDL_mixer using DMX-to-WAV conversion on the host
+* **Music playback** via SDL_mixer with MUS-to-MIDI conversion, using native
+  MIDI on Windows (wavetable synth) and Timidity on Linux
+* **On-screen FPS overlay** drawn with the in-game HUD font
+
+See `BUILD_REFERENCE.md` for detailed build/run instructions and
+`CHANGES.md` for a comprehensive changelog.
+
 # requirements
 
+## Linux
 * A Linux operating system
 * An AMDGPU with ROCm support
 * SDL2 libraries
 * A ROCm or ROCR-Runtime installation
 * An LLVM build off of the main branch (LLVM22 as of writing)
+
+## Windows
+* Windows 10/11 with an AMD RDNA GPU and ROCm-compatible drivers
+* Visual Studio 2022 (for vcvars64 environment)
+* ROCm SDK via TheRock Python wheels (`pip install rocm-sdk-core rocm-sdk-devel`)
+* LLVM source tree (for GPU libc headers)
 
 # why
 

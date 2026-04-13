@@ -411,69 +411,49 @@ static void sdl_draw(void *buffer_ptr) {
 }
 
 // ---------------------------------------------------------------------------
-// Host-side software audio mixer
+// Host-side audio via SDL_mixer (SFX + Music)
 // ---------------------------------------------------------------------------
+
+#include <SDL_mixer.h>
 
 #define SND_NUM_CHANNELS 16
 #define SND_OUTPUT_RATE 44100
 
-struct CachedSound {
-  int16_t *samples;   // converted to signed 16-bit
-  int length;         // number of samples
-  int sample_rate;
-};
+static std::unordered_map<int, Mix_Chunk *> sfx_cache;
 
-struct SoundChannel {
-  bool active;
-  const CachedSound *sound;
-  int position;       // current sample offset (in output sample rate space)
-  int vol_left;       // 0-255
-  int vol_right;      // 0-255
-  int sample_rate;    // source sample rate for resampling
-};
+// Build a WAV in memory from raw PCM so Mix_LoadWAV_RW can parse it.
+static Mix_Chunk *make_wav_chunk(const int16_t *pcm, int num_samples,
+                                 int sample_rate) {
+  int data_bytes = num_samples * 2; // 16-bit mono
+  int wav_size = 44 + data_bytes;
+  uint8_t *wav = (uint8_t *)malloc(wav_size);
 
-static std::unordered_map<int, CachedSound> sfx_cache;
-static SoundChannel snd_channels[SND_NUM_CHANNELS];
-static std::mutex snd_mutex;
-static SDL_AudioDeviceID audio_device;
+  auto w16 = [&](int off, uint16_t v) {
+    wav[off] = v & 0xFF; wav[off + 1] = v >> 8;
+  };
+  auto w32 = [&](int off, uint32_t v) {
+    wav[off] = v & 0xFF; wav[off+1] = (v>>8)&0xFF;
+    wav[off+2] = (v>>16)&0xFF; wav[off+3] = (v>>24)&0xFF;
+  };
 
-static void audio_callback(void *userdata, Uint8 *stream, int len) {
-  int16_t *out = reinterpret_cast<int16_t *>(stream);
-  int total_samples = len / sizeof(int16_t);  // stereo interleaved
-  int frames = total_samples / 2;
+  memcpy(wav, "RIFF", 4);        w32(4, wav_size - 8);
+  memcpy(wav + 8, "WAVE", 4);
+  memcpy(wav + 12, "fmt ", 4);   w32(16, 16);
+  w16(20, 1);                    // PCM
+  w16(22, 1);                    // mono
+  w32(24, sample_rate);
+  w32(28, sample_rate * 2);      // bytes/sec
+  w16(32, 2);                    // block align
+  w16(34, 16);                   // bits/sample
+  memcpy(wav + 36, "data", 4);   w32(40, data_bytes);
+  memcpy(wav + 44, pcm, data_bytes);
 
-  memset(stream, 0, len);
-
-  std::lock_guard<std::mutex> lock(snd_mutex);
-  for (int ch = 0; ch < SND_NUM_CHANNELS; ch++) {
-    SoundChannel &c = snd_channels[ch];
-    if (!c.active || !c.sound)
-      continue;
-
-    const CachedSound *snd = c.sound;
-    for (int i = 0; i < frames; i++) {
-      // Resample from source rate to output rate using nearest-neighbor
-      int src_pos = (int)((int64_t)c.position * snd->sample_rate / SND_OUTPUT_RATE);
-      if (src_pos >= snd->length) {
-        c.active = false;
-        break;
-      }
-      int32_t sample = snd->samples[src_pos];
-      int32_t left  = (sample * c.vol_left)  / 255;
-      int32_t right = (sample * c.vol_right) / 255;
-      // Saturating add
-      int32_t cur_l = out[i * 2]     + left;
-      int32_t cur_r = out[i * 2 + 1] + right;
-      if (cur_l > 32767) cur_l = 32767; else if (cur_l < -32768) cur_l = -32768;
-      if (cur_r > 32767) cur_r = 32767; else if (cur_r < -32768) cur_r = -32768;
-      out[i * 2]     = (int16_t)cur_l;
-      out[i * 2 + 1] = (int16_t)cur_r;
-      c.position++;
-    }
-  }
+  SDL_RWops *rw = SDL_RWFromMem(wav, wav_size);
+  Mix_Chunk *chunk = Mix_LoadWAV_RW(rw, 1);
+  free(wav);
+  return chunk;
 }
 
-// Parse a DMX sound lump (8-byte header + unsigned 8-bit PCM) and cache it.
 static void cache_dmx_sound(int lumpnum, const uint8_t *data, int datalen) {
   if (sfx_cache.count(lumpnum))
     return;
@@ -491,7 +471,6 @@ static void cache_dmx_sound(int lumpnum, const uint8_t *data, int datalen) {
   if (num_samples <= 0)
     return;
 
-  // Strip the 16-sample padding at start and end that DMX format adds
   int pad = (num_samples > 32) ? 16 : 0;
   const uint8_t *pcm = data + 8 + pad;
   int actual_samples = num_samples - 2 * pad;
@@ -505,20 +484,12 @@ static void cache_dmx_sound(int lumpnum, const uint8_t *data, int datalen) {
   for (int i = 0; i < actual_samples; i++)
     converted[i] = ((int)pcm[i] - 128) << 8;
 
-  CachedSound cs;
-  cs.samples = converted;
-  cs.length = actual_samples;
-  cs.sample_rate = sample_rate > 0 ? sample_rate : 11025;
-  sfx_cache[lumpnum] = cs;
-}
+  if (sample_rate <= 0) sample_rate = 11025;
+  Mix_Chunk *chunk = make_wav_chunk(converted, actual_samples, sample_rate);
+  free(converted);
 
-// Compute left/right volume from DOOM's vol (0-127) and sep (0-254, 127=center).
-static void compute_stereo_vol(int vol, int sep, int &left, int &right) {
-  // sep: 0 = full left, 127 = center, 254 = full right
-  left  = ((254 - sep) * vol) / 127;
-  right = (sep * vol) / 127;
-  if (left  > 255) left  = 255;
-  if (right > 255) right = 255;
+  if (chunk)
+    sfx_cache[lumpnum] = chunk;
 }
 
 static void snd_start(int lumpnum, int channel, int vol, int sep) {
@@ -528,72 +499,52 @@ static void snd_start(int lumpnum, int channel, int vol, int sep) {
   if (it == sfx_cache.end())
     return;
 
-  std::lock_guard<std::mutex> lock(snd_mutex);
-  SoundChannel &c = snd_channels[channel];
-  c.active = true;
-  c.sound = &it->second;
-  c.position = 0;
-  c.sample_rate = it->second.sample_rate;
-  compute_stereo_vol(vol, sep, c.vol_left, c.vol_right);
+  Mix_PlayChannel(channel, it->second, 0);
+  Mix_Volume(channel, vol);
+  // sep: 0 = full left, 127 = center, 254 = full right
+  Uint8 left  = (Uint8)((254 - sep) * 255 / 254);
+  Uint8 right = (Uint8)(sep * 255 / 254);
+  Mix_SetPanning(channel, left, right);
 }
 
 static void snd_stop(int channel) {
   if (channel < 0 || channel >= SND_NUM_CHANNELS)
     return;
-  std::lock_guard<std::mutex> lock(snd_mutex);
-  snd_channels[channel].active = false;
+  Mix_HaltChannel(channel);
 }
 
 static void snd_update(int channel, int vol, int sep) {
   if (channel < 0 || channel >= SND_NUM_CHANNELS)
     return;
-  std::lock_guard<std::mutex> lock(snd_mutex);
-  compute_stereo_vol(vol, sep, snd_channels[channel].vol_left,
-                     snd_channels[channel].vol_right);
+  Mix_Volume(channel, vol);
+  Uint8 left  = (Uint8)((254 - sep) * 255 / 254);
+  Uint8 right = (Uint8)(sep * 255 / 254);
+  Mix_SetPanning(channel, left, right);
 }
 
 static uint32_t snd_poll() {
-  std::lock_guard<std::mutex> lock(snd_mutex);
   uint32_t mask = 0;
   for (int i = 0; i < SND_NUM_CHANNELS; i++)
-    if (snd_channels[i].active)
+    if (Mix_Playing(i))
       mask |= (1u << i);
   return mask;
 }
 
 static void init_sdl_audio() {
-  SDL_AudioSpec want = {}, have = {};
-  want.freq = SND_OUTPUT_RATE;
-  want.format = AUDIO_S16SYS;
-  want.channels = 2;
-  want.samples = 1024;
-  want.callback = audio_callback;
-
-  audio_device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-  if (audio_device == 0) {
-    fprintf(stderr, "[snd] Failed to open audio device: %s\n", SDL_GetError());
+  if (Mix_OpenAudio(SND_OUTPUT_RATE, MIX_DEFAULT_FORMAT, 2, 1024) < 0) {
+    fprintf(stderr, "[snd] Mix_OpenAudio failed: %s\n", Mix_GetError());
     return;
   }
-  fprintf(stderr, "[snd] Audio device opened: %d Hz, %d ch, %d samples\n",
-          have.freq, have.channels, have.samples);
-  SDL_PauseAudioDevice(audio_device, 0);
+  Mix_AllocateChannels(SND_NUM_CHANNELS);
+  fprintf(stderr, "[snd] SDL_mixer audio opened: %d Hz, %d channels\n",
+          SND_OUTPUT_RATE, SND_NUM_CHANNELS);
 }
 
 // ---------------------------------------------------------------------------
-// Host-side music: MUS-to-MIDI converter + Windows MIDI playback
+// Host-side music via SDL_mixer (MUS-to-MIDI + Mix_LoadMUS)
 // ---------------------------------------------------------------------------
 
-#ifdef _WIN32
-
-static uint32_t mus_next_handle = 1;
-static std::string mus_midi_path;
-static bool mus_playing = false;
-static bool mus_looping = false;
-static bool mus_paused = false;
-
-// Self-contained MUS-to-MIDI converter (ported from mus2mid.c).
-// Writes output into a std::vector<uint8_t>.
-
+// Self-contained MUS-to-MIDI converter.
 struct MidiWriter {
   std::vector<uint8_t> buf;
   unsigned int tracksize = 0;
@@ -602,79 +553,57 @@ struct MidiWriter {
   int channel_map[16];
 
   void init() {
-    buf.clear();
-    tracksize = 0;
-    queuedtime = 0;
+    buf.clear(); tracksize = 0; queuedtime = 0;
     memset(channelvelocities, 127, sizeof(channelvelocities));
     for (int i = 0; i < 16; i++) channel_map[i] = -1;
   }
-
   void write(const void *data, size_t len) {
     auto p = reinterpret_cast<const uint8_t *>(data);
     buf.insert(buf.end(), p, p + len);
   }
-
   void write8(uint8_t v) { buf.push_back(v); }
-
-  bool writeTime(unsigned int time) {
+  void writeTime(unsigned int time) {
     unsigned int buffer = time & 0x7F;
-    while ((time >>= 7) != 0) {
-      buffer <<= 8;
-      buffer |= ((time & 0x7F) | 0x80);
-    }
+    while ((time >>= 7) != 0) { buffer <<= 8; buffer |= ((time & 0x7F) | 0x80); }
     for (;;) {
-      write8(buffer & 0xFF);
-      tracksize++;
+      write8(buffer & 0xFF); tracksize++;
       if (buffer & 0x80) buffer >>= 8;
-      else { queuedtime = 0; return false; }
+      else { queuedtime = 0; return; }
     }
   }
-
-  void writeEvent2(uint8_t status, uint8_t d1) {
-    writeTime(queuedtime);
-    write8(status); write8(d1);
-    tracksize += 2;
+  void writeEvent2(uint8_t s, uint8_t d1) {
+    writeTime(queuedtime); write8(s); write8(d1); tracksize += 2;
   }
-
-  void writeEvent3(uint8_t status, uint8_t d1, uint8_t d2) {
-    writeTime(queuedtime);
-    write8(status); write8(d1); write8(d2);
-    tracksize += 3;
+  void writeEvent3(uint8_t s, uint8_t d1, uint8_t d2) {
+    writeTime(queuedtime); write8(s); write8(d1); write8(d2); tracksize += 3;
   }
-
   int getMIDIChannel(int mus_ch) {
-    if (mus_ch == 15) return 9; // MUS percussion → MIDI percussion
+    if (mus_ch == 15) return 9;
     if (channel_map[mus_ch] == -1) {
       int max = -1;
       for (int i = 0; i < 16; i++)
         if (channel_map[i] > max) max = channel_map[i];
       int result = max + 1;
-      if (result == 9) result++; // skip MIDI percussion channel
+      if (result == 9) result++;
       channel_map[mus_ch] = result;
-      // Send "all notes off" on first use
       writeEvent3(0xB0 | result, 0x7B, 0);
     }
     return channel_map[mus_ch];
   }
 };
 
-static const uint8_t mus_controller_map[] = {
+static const uint8_t mus_ctrl_map[] = {
     0x00, 0x20, 0x01, 0x07, 0x0A, 0x0B, 0x5B, 0x5D,
     0x40, 0x43, 0x78, 0x7B, 0x7E, 0x7F, 0x79
 };
 
 static bool mus_to_midi(const uint8_t *mus, int muslen,
                         std::vector<uint8_t> &out) {
-  if (muslen < 16) return false;
-  if (memcmp(mus, "MUS\x1a", 4) != 0) return false;
-
+  if (muslen < 16 || memcmp(mus, "MUS\x1a", 4) != 0) return false;
   int scorestart = mus[6] | (mus[7] << 8);
   if (scorestart >= muslen) return false;
 
-  MidiWriter w;
-  w.init();
-
-  // MIDI header
+  MidiWriter w; w.init();
   static const uint8_t hdr[] = {
       'M','T','h','d', 0,0,0,6, 0,0, 0,1, 0,0x46,
       'M','T','r','k', 0,0,0,0
@@ -683,206 +612,131 @@ static bool mus_to_midi(const uint8_t *mus, int muslen,
 
   int pos = scorestart;
   bool hitend = false;
-
   while (!hitend && pos < muslen) {
     while (!hitend && pos < muslen) {
       uint8_t desc = mus[pos++];
       int ch = w.getMIDIChannel(desc & 0x0F);
-      int event = desc & 0x70;
-
-      switch (event) {
-      case 0x00: { // release
-        if (pos >= muslen) return false;
+      switch (desc & 0x70) {
+      case 0x00: { if (pos>=muslen) return false; w.writeEvent3(0x80|ch, mus[pos++]&0x7F, 0); break; }
+      case 0x10: {
+        if (pos>=muslen) return false;
         uint8_t key = mus[pos++];
-        w.writeEvent3(0x80 | ch, key & 0x7F, 0);
+        if (key & 0x80) { if (pos>=muslen) return false; w.channelvelocities[ch] = mus[pos++]&0x7F; }
+        w.writeEvent3(0x90|ch, key&0x7F, w.channelvelocities[ch]); break;
+      }
+      case 0x20: { if (pos>=muslen) return false; short wh=(short)(mus[pos++])*64; w.writeEvent3(0xE0|ch, wh&0x7F, (wh>>7)&0x7F); break; }
+      case 0x30: {
+        if (pos>=muslen) return false; uint8_t c=mus[pos++];
+        if (c<10||c>14) return false;
+        w.writeEvent3(0xB0|ch, mus_ctrl_map[c], 0); break;
+      }
+      case 0x40: {
+        if (pos+1>=muslen) return false;
+        uint8_t c=mus[pos++], v=mus[pos++];
+        if (c==0) { w.writeEvent2(0xC0|ch, v&0x7F); }
+        else { if (c<1||c>9) return false; uint8_t vv=v; if(vv&0x80) vv=0x7F; w.writeEvent3(0xB0|ch, mus_ctrl_map[c], vv); }
         break;
       }
-      case 0x10: { // press
-        if (pos >= muslen) return false;
-        uint8_t key = mus[pos++];
-        if (key & 0x80) {
-          if (pos >= muslen) return false;
-          w.channelvelocities[ch] = mus[pos++] & 0x7F;
-        }
-        w.writeEvent3(0x90 | ch, key & 0x7F, w.channelvelocities[ch]);
-        break;
+      case 0x60: hitend=true; break;
+      default: return false;
       }
-      case 0x20: { // pitch bend
-        if (pos >= muslen) return false;
-        short wheel = (short)(mus[pos++]) * 64;
-        w.writeEvent3(0xE0 | ch, wheel & 0x7F, (wheel >> 7) & 0x7F);
-        break;
-      }
-      case 0x30: { // system event
-        if (pos >= muslen) return false;
-        uint8_t ctrl = mus[pos++];
-        if (ctrl < 10 || ctrl > 14) return false;
-        w.writeEvent3(0xB0 | ch, mus_controller_map[ctrl], 0);
-        break;
-      }
-      case 0x40: { // controller
-        if (pos + 1 >= muslen) return false;
-        uint8_t ctrl = mus[pos++];
-        uint8_t val = mus[pos++];
-        if (ctrl == 0) {
-          w.writeEvent2(0xC0 | ch, val & 0x7F);
-        } else {
-          if (ctrl < 1 || ctrl > 9) return false;
-          uint8_t v = val;
-          if (v & 0x80) v = 0x7F;
-          w.writeEvent3(0xB0 | ch, mus_controller_map[ctrl], v);
-        }
-        break;
-      }
-      case 0x60: // score end
-        hitend = true;
-        break;
-      default:
-        return false;
-      }
-
-      if (desc & 0x80) break; // last event in group
+      if (desc & 0x80) break;
     }
-    // Read time delay
     if (!hitend && pos < muslen) {
       unsigned int delay = 0;
-      for (;;) {
-        if (pos >= muslen) return false;
-        uint8_t b = mus[pos++];
-        delay = delay * 128 + (b & 0x7F);
-        if (!(b & 0x80)) break;
-      }
+      for (;;) { if (pos>=muslen) return false; uint8_t b=mus[pos++]; delay=delay*128+(b&0x7F); if (!(b&0x80)) break; }
       w.queuedtime += delay;
     }
   }
-
-  // End of track
   w.writeTime(w.queuedtime);
   w.write8(0xFF); w.write8(0x2F); w.write8(0x00);
   w.tracksize += 3;
-
-  // Patch track size at offset 18
   uint32_t ts = w.tracksize;
-  w.buf[18] = (ts >> 24) & 0xFF;
-  w.buf[19] = (ts >> 16) & 0xFF;
-  w.buf[20] = (ts >> 8) & 0xFF;
-  w.buf[21] = ts & 0xFF;
-
+  w.buf[18]=(ts>>24)&0xFF; w.buf[19]=(ts>>16)&0xFF;
+  w.buf[20]=(ts>>8)&0xFF;  w.buf[21]=ts&0xFF;
   out = std::move(w.buf);
   return true;
 }
 
 static std::string get_temp_midi_path() {
-  char tmp[MAX_PATH + 1];
-  GetTempPathA(MAX_PATH, tmp);
-  return std::string(tmp) + "doom_gpu_music.mid";
+  const char *tmp = getenv("TMPDIR");
+  if (!tmp) tmp = getenv("TEMP");
+  if (!tmp) tmp = "/tmp";
+  return std::string(tmp) + "/doom_gpu_music.mid";
 }
 
-static void mus_mci_stop() {
-  mciSendStringA("stop doom_music", nullptr, 0, nullptr);
-  mciSendStringA("close doom_music", nullptr, 0, nullptr);
-  mus_playing = false;
-  mus_paused = false;
-}
+static Mix_Music *current_music = nullptr;
+static std::string current_midi_path;
+static uint32_t mus_next_handle = 1;
 
 static uint32_t mus_register(const uint8_t *data, int len) {
-  mus_mci_stop();
-
-  std::vector<uint8_t> midi;
-  bool is_mid = (len > 4 && memcmp(data, "MThd", 4) == 0);
-
-  if (is_mid) {
-    midi.assign(data, data + len);
-  } else {
-    if (!mus_to_midi(data, len, midi)) {
-      fprintf(stderr, "[mus] MUS-to-MIDI conversion failed\n");
-      return 0;
-    }
+  if (current_music) {
+    Mix_HaltMusic();
+    Mix_FreeMusic(current_music);
+    current_music = nullptr;
   }
 
-  mus_midi_path = get_temp_midi_path();
-  fprintf(stderr, "[mus] Writing MIDI to '%s' (%zu bytes)...\n",
-          mus_midi_path.c_str(), midi.size());
-  FILE *f = fopen(mus_midi_path.c_str(), "wb");
+  std::vector<uint8_t> midi;
+  if (!mus_to_midi(data, len, midi)) {
+    fprintf(stderr, "[mus] MUS-to-MIDI conversion failed (len=%d)\n", len);
+    return 0;
+  }
+
+  current_midi_path = get_temp_midi_path();
+  FILE *f = fopen(current_midi_path.c_str(), "wb");
   if (!f) {
-    fprintf(stderr, "[mus] Failed to write temp MIDI file (errno=%d)\n", errno);
+    fprintf(stderr, "[mus] Failed to write temp MIDI: %s\n",
+            current_midi_path.c_str());
     return 0;
   }
   fwrite(midi.data(), 1, midi.size(), f);
   fclose(f);
 
+  current_music = Mix_LoadMUS(current_midi_path.c_str());
+  if (!current_music) {
+    fprintf(stderr, "[mus] Mix_LoadMUS failed: %s\n", Mix_GetError());
+    return 0;
+  }
+
+  fprintf(stderr, "[mus] Registered song (%d bytes MUS -> %zu bytes MIDI)\n",
+          len, midi.size());
   return mus_next_handle++;
 }
 
 static void mus_unregister(uint32_t handle) {
-  mus_mci_stop();
-  if (!mus_midi_path.empty()) {
-    remove(mus_midi_path.c_str());
-    mus_midi_path.clear();
+  if (current_music) {
+    Mix_HaltMusic();
+    Mix_FreeMusic(current_music);
+    current_music = nullptr;
   }
 }
 
 static void mus_play(uint32_t handle, int looping) {
-  if (mus_midi_path.empty()) return;
-  mus_mci_stop();
-
-  std::string cmd = "open \"" + mus_midi_path + "\" type sequencer alias doom_music";
-  if (mciSendStringA(cmd.c_str(), nullptr, 0, nullptr) != 0) {
-    fprintf(stderr, "[mus] mciSendString open failed\n");
-    return;
-  }
-  if (mciSendStringA("play doom_music from 0", nullptr, 0, nullptr) != 0) {
-    fprintf(stderr, "[mus] mciSendString play failed\n");
-    return;
-  }
-  mus_playing = true;
-  mus_looping = (looping != 0);
-  mus_paused = false;
+  if (!current_music) return;
+  Mix_PlayMusic(current_music, looping ? -1 : 1);
+  fprintf(stderr, "[mus] Playing music (loop=%d)\n", looping);
 }
 
 static void mus_stop() {
-  mus_mci_stop();
+  Mix_HaltMusic();
 }
 
 static void mus_set_volume(int vol) {
-  // MCI sequencer doesn't support setaudio volume; use midiOutSetVolume
-  // on the MIDI mapper device instead.
-  DWORD v = (DWORD)vol * 0xFFFF / 127;
-  DWORD stereo = v | (v << 16);
-  midiOutSetVolume(reinterpret_cast<HMIDIOUT>(static_cast<UINT_PTR>(MIDI_MAPPER)),
-                   stereo);
+  // Doom volume: 0-127, SDL_mixer: 0-128
+  Mix_VolumeMusic(vol);
 }
 
 static void mus_pause() {
-  if (mus_playing && !mus_paused) {
-    mciSendStringA("pause doom_music", nullptr, 0, nullptr);
-    mus_paused = true;
-  }
+  Mix_PauseMusic();
 }
 
 static void mus_resume() {
-  if (mus_playing && mus_paused) {
-    mciSendStringA("resume doom_music", nullptr, 0, nullptr);
-    mus_paused = false;
-  }
+  Mix_ResumeMusic();
 }
 
 static int mus_is_playing() {
-  if (!mus_playing) return 0;
-  char status[64] = {};
-  mciSendStringA("status doom_music mode", status, sizeof(status), nullptr);
-  if (strcmp(status, "stopped") == 0) {
-    if (mus_looping) {
-      mciSendStringA("play doom_music from 0", nullptr, 0, nullptr);
-      return 1;
-    }
-    mus_playing = false;
-    return 0;
-  }
-  return 1;
+  return Mix_PlayingMusic() && !Mix_PausedMusic() ? 1 : 0;
 }
-
-#endif // _WIN32
 
 template <uint32_t num_lanes, typename Alloc, typename Free>
 static uint32_t handle_server(rpc::Server &server, uint32_t index,
@@ -961,7 +815,6 @@ static uint32_t handle_server(rpc::Server &server, uint32_t index,
     });
     break;
   }
-#ifdef _WIN32
   case DOOM_MUS_REGISTER: {
     int mus_datalen = 0;
     port->recv([&](rpc::Buffer *buffer, uint32_t) {
@@ -1018,7 +871,6 @@ static uint32_t handle_server(rpc::Server &server, uint32_t index,
     });
     break;
   }
-#endif // _WIN32
   case LIBC_EXIT: {
     port->recv_and_send([](rpc::Buffer *, uint32_t) {});
     port->recv([](rpc::Buffer *buffer, uint32_t) {

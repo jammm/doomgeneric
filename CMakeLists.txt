@@ -70,6 +70,26 @@ if(MSVC OR (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND WIN32))
 endif()
 
 # ---------------------------------------------------------------------------
+# SDL2_mixer (vendored, MIDI-only)
+# ---------------------------------------------------------------------------
+set(SDL2MIXER_MIDI ON CACHE BOOL "" FORCE)
+set(SDL2MIXER_MIDI_NATIVE ON CACHE BOOL "" FORCE)
+set(SDL2MIXER_MIDI_TIMIDITY ON CACHE BOOL "" FORCE)
+set(SDL2MIXER_MIDI_FLUIDSYNTH OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_MP3 OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_FLAC OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_MOD OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_OPUS OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_VORBIS "" CACHE STRING "" FORCE)
+set(SDL2MIXER_WAVPACK OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_CMD OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_SAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/SDL_mixer EXCLUDE_FROM_ALL)
+
+
+# ---------------------------------------------------------------------------
 # Sub-projects
 # ---------------------------------------------------------------------------
 add_subdirectory(doomgeneric)

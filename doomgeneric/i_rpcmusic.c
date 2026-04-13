@@ -1,7 +1,7 @@
 //
 // RPC-based music module for GPU port.
-// Sends raw MUS/MIDI lump data to the host, which converts MUS to MIDI
-// and plays it using the Windows MIDI API.
+// Sends raw MUS lump data to the host, which converts it to MIDI and
+// plays it via SDL_mixer (native MIDI on Windows, Timidity on Linux).
 //
 
 #include "doomtype.h"
