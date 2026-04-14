@@ -28,7 +28,6 @@ void DG_DrawFrame() {
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = reinterpret_cast<uintptr_t>(DG_ScreenBuffer);
   });
-  port.close();
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -45,12 +44,13 @@ uint32_t DG_GetTicksMs() {
 }
 
 int DG_GetKey(int *pressed, unsigned char *doomKey) {
-  auto port = client.open<DOOM_GET_INPUT>();
   uint32_t key = 0;
-  port.send_and_recv(
-      [](rpc::Buffer *, uint32_t) {},
-      [&](rpc::Buffer *buffer, uint32_t) { key = buffer->data[0]; });
-  port.close();
+  {
+    auto port = client.open<DOOM_GET_INPUT>();
+    port.send_and_recv(
+        [](rpc::Buffer *, uint32_t) {},
+        [&](rpc::Buffer *buffer, uint32_t) { key = buffer->data[0]; });
+  }
   if (key == 0)
     return 0;
 
@@ -77,7 +77,6 @@ int DG_SndStart(int lumpnum, void *data, int datalen,
     uint64_t len = static_cast<uint64_t>(datalen);
     port.send_n(&data, &len);
   }
-  port.close();
   return channel;
 }
 
@@ -86,7 +85,6 @@ void DG_SndStop(int channel) {
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(channel);
   });
-  port.close();
 }
 
 void DG_SndUpdateParams(int channel, int vol, int sep) {
@@ -96,31 +94,32 @@ void DG_SndUpdateParams(int channel, int vol, int sep) {
     buffer->data[1] = static_cast<uint64_t>(vol);
     buffer->data[2] = static_cast<uint64_t>(sep);
   });
-  port.close();
 }
 
 uint32_t DG_SndPoll(void) {
-  auto port = client.open<DOOM_SND_POLL>();
   uint32_t mask = 0;
-  port.send_and_recv(
-      [](rpc::Buffer *, uint32_t) {},
-      [&](rpc::Buffer *buffer, uint32_t) { mask = (uint32_t)buffer->data[0]; });
-  port.close();
+  {
+    auto port = client.open<DOOM_SND_POLL>();
+    port.send_and_recv(
+        [](rpc::Buffer *, uint32_t) {},
+        [&](rpc::Buffer *buffer, uint32_t) { mask = (uint32_t)buffer->data[0]; });
+  }
   return mask;
 }
 
 uint32_t DG_MusRegister(void *data, int len) {
-  auto port = client.open<DOOM_MUS_REGISTER>();
   uint32_t handle = 0;
-  port.send([&](rpc::Buffer *buffer, uint32_t) {
-    buffer->data[0] = static_cast<uint64_t>(len);
-  });
-  uint64_t slen = static_cast<uint64_t>(len);
-  port.send_n(&data, &slen);
-  port.recv([&](rpc::Buffer *buffer, uint32_t) {
-    handle = static_cast<uint32_t>(buffer->data[0]);
-  });
-  port.close();
+  {
+    auto port = client.open<DOOM_MUS_REGISTER>();
+    port.send([&](rpc::Buffer *buffer, uint32_t) {
+      buffer->data[0] = static_cast<uint64_t>(len);
+    });
+    uint64_t slen = static_cast<uint64_t>(len);
+    port.send_n(&data, &slen);
+    port.recv([&](rpc::Buffer *buffer, uint32_t) {
+      handle = static_cast<uint32_t>(buffer->data[0]);
+    });
+  }
   return handle;
 }
 
@@ -129,7 +128,6 @@ void DG_MusUnregister(uint32_t handle) {
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(handle);
   });
-  port.close();
 }
 
 void DG_MusPlay(uint32_t handle, int looping) {
@@ -138,13 +136,11 @@ void DG_MusPlay(uint32_t handle, int looping) {
     buffer->data[0] = static_cast<uint64_t>(handle);
     buffer->data[1] = static_cast<uint64_t>(looping);
   });
-  port.close();
 }
 
 void DG_MusStop(void) {
   auto port = client.open<DOOM_MUS_STOP>();
   port.send([](rpc::Buffer *, uint32_t) {});
-  port.close();
 }
 
 void DG_MusSetVolume(int volume) {
@@ -152,30 +148,28 @@ void DG_MusSetVolume(int volume) {
   port.send([&](rpc::Buffer *buffer, uint32_t) {
     buffer->data[0] = static_cast<uint64_t>(volume);
   });
-  port.close();
 }
 
 void DG_MusPause(void) {
   auto port = client.open<DOOM_MUS_PAUSE>();
   port.send([](rpc::Buffer *, uint32_t) {});
-  port.close();
 }
 
 void DG_MusResume(void) {
   auto port = client.open<DOOM_MUS_RESUME>();
   port.send([](rpc::Buffer *, uint32_t) {});
-  port.close();
 }
 
 int DG_MusIsPlaying(void) {
-  auto port = client.open<DOOM_MUS_IS_PLAYING>();
   int playing = 0;
-  port.send_and_recv(
-      [](rpc::Buffer *, uint32_t) {},
-      [&](rpc::Buffer *buffer, uint32_t) {
-        playing = static_cast<int>(buffer->data[0]);
-      });
-  port.close();
+  {
+    auto port = client.open<DOOM_MUS_IS_PLAYING>();
+    port.send_and_recv(
+        [](rpc::Buffer *, uint32_t) {},
+        [&](rpc::Buffer *buffer, uint32_t) {
+          playing = static_cast<int>(buffer->data[0]);
+        });
+  }
   return playing;
 }
 #endif // FEATURE_SOUND
