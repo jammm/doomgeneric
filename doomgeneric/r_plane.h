@@ -59,6 +59,12 @@ R_MakeSpans
 
 void R_DrawPlanes (void);
 
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+void R_PreparePlanes (void);
+void R_ReleasePlanes (void);
+void R_DrawPlanesParallel (void);
+#endif
+
 visplane_t*
 R_FindPlane
 ( fixed_t	height,

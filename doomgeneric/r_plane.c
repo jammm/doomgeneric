@@ -444,3 +444,195 @@ void R_DrawPlanes (void)
         W_ReleaseLumpNum(lumpnum);
     }
 }
+
+#if defined(__AMDGPU__) || defined(__NVPTX__)
+#include <gpuintrin.h>
+
+extern byte*	ylookup[832];
+extern int	columnofs[1120];
+
+static byte *visplane_flat_cache[MAXVISPLANES];
+
+void R_PreparePlanes(void)
+{
+    visplane_t *pl;
+    int x, angle;
+
+    for (pl = visplanes; pl < lastvisplane; pl++)
+    {
+	int idx = pl - visplanes;
+	visplane_flat_cache[idx] = NULL;
+
+	if (pl->minx > pl->maxx)
+	    continue;
+
+	if (pl->picnum == skyflatnum)
+	{
+	    dc_iscale = pspriteiscale >> detailshift;
+	    dc_colormap = colormaps;
+	    dc_texturemid = skytexturemid;
+	    for (x = pl->minx; x <= pl->maxx; x++)
+	    {
+		dc_yl = pl->top[x];
+		dc_yh = pl->bottom[x];
+		if (dc_yl <= dc_yh)
+		{
+		    angle = (viewangle + xtoviewangle[x]) >> ANGLETOSKYSHIFT;
+		    dc_x = x;
+		    dc_source = R_GetColumn(skytexture, angle);
+		    colfunc();
+		}
+	    }
+	}
+	else
+	{
+	    int lumpnum = firstflat + flattranslation[pl->picnum];
+	    visplane_flat_cache[idx] = W_CacheLumpNum(lumpnum, PU_STATIC);
+	}
+    }
+}
+
+void R_ReleasePlanes(void)
+{
+    visplane_t *pl;
+
+    for (pl = visplanes; pl < lastvisplane; pl++)
+    {
+	if (pl->minx > pl->maxx)
+	    continue;
+	if (pl->picnum == skyflatnum)
+	    continue;
+	int lumpnum = firstflat + flattranslation[pl->picnum];
+	W_ReleaseLumpNum(lumpnum);
+    }
+}
+
+void R_DrawPlanesParallel(void)
+{
+    uint32_t tid = __gpu_thread_id(0);
+    uint32_t nthreads = __gpu_num_threads(0);
+    int num_planes = lastvisplane - visplanes;
+    int local_spanstart[SCREENHEIGHT];
+    memset(local_spanstart, 0, sizeof(local_spanstart));
+
+    for (int pi = (int)tid; pi < num_planes; pi += (int)nthreads)
+    {
+	visplane_t *pl = &visplanes[pi];
+
+	if (pl->minx > pl->maxx)
+	    continue;
+	if (pl->picnum == skyflatnum)
+	    continue;
+
+	byte *source = visplane_flat_cache[pi];
+	if (!source)
+	    continue;
+
+	fixed_t local_planeheight = abs(pl->height - viewz);
+	int light = (pl->lightlevel >> LIGHTSEGSHIFT) + extralight;
+	if (light >= LIGHTLEVELS) light = LIGHTLEVELS - 1;
+	if (light < 0) light = 0;
+	lighttable_t **local_zlight = zlight[light];
+
+	pl->top[pl->maxx + 1] = 0xff;
+	pl->top[pl->minx - 1] = 0xff;
+
+	int stop = pl->maxx + 1;
+
+	for (int x = pl->minx; x <= stop; x++)
+	{
+	    int t1 = pl->top[x - 1];
+	    int b1 = pl->bottom[x - 1];
+	    int t2 = pl->top[x];
+	    int b2 = pl->bottom[x];
+
+	    while (t1 < t2 && t1 <= b1)
+	    {
+		fixed_t distance = FixedMul(local_planeheight, yslope[t1]);
+		fixed_t xstep = FixedMul(distance, basexscale);
+		fixed_t ystep = FixedMul(distance, baseyscale);
+		fixed_t length = FixedMul(distance, distscale[local_spanstart[t1]]);
+		angle_t ang = (viewangle + xtoviewangle[local_spanstart[t1]]) >> ANGLETOFINESHIFT;
+		fixed_t xfrac = viewx + FixedMul(finecosine[ang], length);
+		fixed_t yfrac = -viewy - FixedMul(finesine[ang], length);
+
+		lighttable_t *colormap;
+		if (fixedcolormap)
+		    colormap = fixedcolormap;
+		else {
+		    unsigned int idx = distance >> LIGHTZSHIFT;
+		    if (idx >= MAXLIGHTZ) idx = MAXLIGHTZ - 1;
+		    colormap = local_zlight[idx];
+		}
+
+		int x1 = local_spanstart[t1];
+		int x2 = x - 1;
+		unsigned int position = ((xfrac << 10) & 0xffff0000)
+				      | ((yfrac >> 6)  & 0x0000ffff);
+		unsigned int step = ((xstep << 10) & 0xffff0000)
+				  | ((ystep >> 6)  & 0x0000ffff);
+		byte *dest = ylookup[t1] + columnofs[x1];
+		int count = x2 - x1;
+		if (count >= 0) {
+		    do {
+			unsigned int ytemp = (position >> 4) & 0x0fc0;
+			unsigned int xtemp = (position >> 26);
+			*dest++ = colormap[source[xtemp | ytemp]];
+			position += step;
+		    } while (count--);
+		}
+		t1++;
+	    }
+	    while (b1 > b2 && b1 >= t1)
+	    {
+		fixed_t distance = FixedMul(local_planeheight, yslope[b1]);
+		fixed_t xstep = FixedMul(distance, basexscale);
+		fixed_t ystep = FixedMul(distance, baseyscale);
+		fixed_t length = FixedMul(distance, distscale[local_spanstart[b1]]);
+		angle_t ang = (viewangle + xtoviewangle[local_spanstart[b1]]) >> ANGLETOFINESHIFT;
+		fixed_t xfrac = viewx + FixedMul(finecosine[ang], length);
+		fixed_t yfrac = -viewy - FixedMul(finesine[ang], length);
+
+		lighttable_t *colormap;
+		if (fixedcolormap)
+		    colormap = fixedcolormap;
+		else {
+		    unsigned int idx = distance >> LIGHTZSHIFT;
+		    if (idx >= MAXLIGHTZ) idx = MAXLIGHTZ - 1;
+		    colormap = local_zlight[idx];
+		}
+
+		int x1 = local_spanstart[b1];
+		int x2 = x - 1;
+		unsigned int position = ((xfrac << 10) & 0xffff0000)
+				      | ((yfrac >> 6)  & 0x0000ffff);
+		unsigned int step = ((xstep << 10) & 0xffff0000)
+				  | ((ystep >> 6)  & 0x0000ffff);
+		byte *dest = ylookup[b1] + columnofs[x1];
+		int count = x2 - x1;
+		if (count >= 0) {
+		    do {
+			unsigned int ytemp = (position >> 4) & 0x0fc0;
+			unsigned int xtemp = (position >> 26);
+			*dest++ = colormap[source[xtemp | ytemp]];
+			position += step;
+		    } while (count--);
+		}
+		b1--;
+	    }
+
+	    while (t2 < t1 && t2 <= b2)
+	    {
+		local_spanstart[t2] = x;
+		t2++;
+	    }
+	    while (b2 > b1 && b2 >= t2)
+	    {
+		local_spanstart[b2] = x;
+		b2--;
+	    }
+	}
+    }
+}
+
+#endif /* __AMDGPU__ || __NVPTX__ */

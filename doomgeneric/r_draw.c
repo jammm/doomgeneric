@@ -769,11 +769,15 @@ void R_DrawSpanLow (void)
 #if defined(__AMDGPU__) || defined(__NVPTX__)
 #include <gpuintrin.h>
 
+enum { COLCMD_NORMAL = 0, COLCMD_FUZZ = 1, COLCMD_TRANSLATED = 2 };
+
 typedef struct {
     int x, yl, yh;
     fixed_t iscale, texturemid;
     byte *source;
     lighttable_t *colormap;
+    byte *translation;
+    int type;
 } colcmd_t;
 
 typedef struct {
@@ -783,8 +787,8 @@ typedef struct {
     lighttable_t *colormap;
 } spancmd_t;
 
-#define MAX_COL_CMDS  4096
-#define MAX_SPAN_CMDS 8192
+#define MAX_COL_CMDS  16384
+#define MAX_SPAN_CMDS 32768
 
 static colcmd_t  col_cmds[MAX_COL_CMDS];
 static int       num_col_cmds;
@@ -806,6 +810,39 @@ void R_DrawColumn_Deferred(void)
     cmd->texturemid = dc_texturemid;
     cmd->source = dc_source;
     cmd->colormap = dc_colormap;
+    cmd->translation = NULL;
+    cmd->type = COLCMD_NORMAL;
+}
+
+void R_DrawFuzzColumn_Deferred(void)
+{
+    if (num_col_cmds >= MAX_COL_CMDS) {
+	R_DrawFuzzColumn();
+	return;
+    }
+    colcmd_t *cmd = &col_cmds[num_col_cmds++];
+    cmd->x = dc_x;
+    cmd->yl = dc_yl;
+    cmd->yh = dc_yh;
+    cmd->type = COLCMD_FUZZ;
+}
+
+void R_DrawTranslatedColumn_Deferred(void)
+{
+    if (num_col_cmds >= MAX_COL_CMDS) {
+	R_DrawTranslatedColumn();
+	return;
+    }
+    colcmd_t *cmd = &col_cmds[num_col_cmds++];
+    cmd->x = dc_x;
+    cmd->yl = dc_yl;
+    cmd->yh = dc_yh;
+    cmd->iscale = dc_iscale;
+    cmd->texturemid = dc_texturemid;
+    cmd->source = dc_source;
+    cmd->colormap = dc_colormap;
+    cmd->translation = dc_translation;
+    cmd->type = COLCMD_TRANSLATED;
 }
 
 void R_DrawSpan_Deferred(void)
@@ -826,14 +863,40 @@ void R_DrawSpan_Deferred(void)
     cmd->colormap = ds_colormap;
 }
 
+static int masked_col_cmds_start;
+
 void R_ClearDrawCommands(void)
 {
     num_col_cmds = 0;
     num_span_cmds = 0;
+    masked_col_cmds_start = 0;
+}
+
+void R_MarkMaskedCommandsStart(void)
+{
+    masked_col_cmds_start = num_col_cmds;
 }
 
 static void R_ExecColumnCmd(colcmd_t *cmd)
 {
+    if (cmd->type == COLCMD_FUZZ)
+    {
+	int yl = cmd->yl;
+	int yh = cmd->yh;
+	if (!yl) yl = 1;
+	if (yh == viewheight - 1) yh = viewheight - 2;
+	int count = yh - yl;
+	if (count < 0) return;
+	byte *dest = ylookup[yl] + columnofs[cmd->x];
+	int fpos = (yl * cmd->x) % FUZZTABLE;
+	do {
+	    *dest = colormaps[6*256 + dest[fuzzoffset[fpos]]];
+	    if (++fpos == FUZZTABLE) fpos = 0;
+	    dest += SCREENWIDTH;
+	} while (count--);
+	return;
+    }
+
     int count = cmd->yh - cmd->yl;
     if (count < 0) return;
 
@@ -843,11 +906,23 @@ static void R_ExecColumnCmd(colcmd_t *cmd)
     byte *source = cmd->source;
     lighttable_t *colormap = cmd->colormap;
 
-    do {
-	*dest = colormap[source[(frac >> FRACBITS) & 127]];
-	dest += SCREENWIDTH;
-	frac += fracstep;
-    } while (count--);
+    if (cmd->type == COLCMD_TRANSLATED)
+    {
+	byte *translation = cmd->translation;
+	do {
+	    *dest = colormap[translation[source[(frac >> FRACBITS) & 127]]];
+	    dest += SCREENWIDTH;
+	    frac += fracstep;
+	} while (count--);
+    }
+    else
+    {
+	do {
+	    *dest = colormap[source[(frac >> FRACBITS) & 127]];
+	    dest += SCREENWIDTH;
+	    frac += fracstep;
+	} while (count--);
+    }
 }
 
 static void R_ExecSpanCmd(spancmd_t *cmd)
@@ -874,13 +949,28 @@ void R_ExecuteDrawCommands(void)
 {
     uint32_t tid = __gpu_thread_id(0);
     uint32_t nthreads = __gpu_num_threads(0);
-    int total = num_col_cmds + num_span_cmds;
+    int ncols = masked_col_cmds_start;
+    int total = ncols + num_span_cmds;
 
     for (int i = tid; i < total; i += nthreads) {
-	if (i < num_col_cmds)
+	if (i < ncols)
 	    R_ExecColumnCmd(&col_cmds[i]);
 	else
-	    R_ExecSpanCmd(&span_cmds[i - num_col_cmds]);
+	    R_ExecSpanCmd(&span_cmds[i - ncols]);
+    }
+}
+
+void R_ExecuteMaskedCommands(void)
+{
+    uint32_t tid = __gpu_thread_id(0);
+    uint32_t nthreads = __gpu_num_threads(0);
+    int start = masked_col_cmds_start;
+    int total = num_col_cmds - start;
+
+    for (int i = 0; i < total; i++) {
+	colcmd_t *cmd = &col_cmds[start + i];
+	if ((unsigned)cmd->x % nthreads == tid)
+	    R_ExecColumnCmd(cmd);
     }
 }
 

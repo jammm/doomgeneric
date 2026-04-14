@@ -101,9 +101,13 @@ void R_DrawViewBorder (void);
 
 #if defined(__AMDGPU__) || defined(__NVPTX__)
 void    R_DrawColumn_Deferred (void);
+void    R_DrawFuzzColumn_Deferred (void);
+void    R_DrawTranslatedColumn_Deferred (void);
 void    R_DrawSpan_Deferred (void);
 void    R_ClearDrawCommands (void);
+void    R_MarkMaskedCommandsStart (void);
 void    R_ExecuteDrawCommands (void);
+void    R_ExecuteMaskedCommands (void);
 #endif
 
 

@@ -878,27 +878,59 @@ void R_RenderPlayerView (player_t* player)
 	R_ClearDrawCommands ();
 	void (*saved_basecolfunc)(void) = basecolfunc;
 	void (*saved_colfunc)(void) = colfunc;
-	void (*saved_spanfunc)(void) = spanfunc;
+	void (*saved_fuzzcolfunc)(void) = fuzzcolfunc;
+	void (*saved_transcolfunc)(void) = transcolfunc;
 	basecolfunc = colfunc = R_DrawColumn_Deferred;
-	spanfunc = R_DrawSpan_Deferred;
 
 	R_RenderBSPNode (numnodes-1);
 	NetUpdate ();
-	R_DrawPlanes ();
+
+	R_PreparePlanes ();
 	NetUpdate ();
+
+	R_MarkMaskedCommandsStart ();
+
+	fuzzcolfunc = R_DrawFuzzColumn_Deferred;
+	transcolfunc = R_DrawTranslatedColumn_Deferred;
+
+	R_SortVisSprites ();
+
+	if (vissprite_p > vissprites)
+	{
+	    vissprite_t *spr;
+	    for (spr = vsprsortedhead.next ;
+		 spr != &vsprsortedhead ;
+		 spr = spr->next)
+	    {
+		R_DrawSprite (spr);
+	    }
+	}
+
+	{
+	    drawseg_t *ds;
+	    for (ds = ds_p - 1 ; ds >= drawsegs ; ds--)
+		if (ds->maskedtexturecol)
+		    R_RenderMaskedSegRange (ds, ds->x1, ds->x2);
+	}
 
 	basecolfunc = saved_basecolfunc;
 	colfunc = saved_colfunc;
-	spanfunc = saved_spanfunc;
+	fuzzcolfunc = saved_fuzzcolfunc;
+	transcolfunc = saved_transcolfunc;
     }
 
     __gpu_sync_threads ();
     R_ExecuteDrawCommands ();
+    R_DrawPlanesParallel ();
+    __gpu_sync_threads ();
+    R_ExecuteMaskedCommands ();
     __gpu_sync_threads ();
 
     if (__gpu_thread_id(0) == 0)
     {
-	R_DrawMasked ();
+	R_ReleasePlanes ();
+	if (!viewangleoffset)
+	    R_DrawPlayerSprites ();
 	NetUpdate ();
     }
 #else

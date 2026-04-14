@@ -92,7 +92,7 @@ struct color colors[256];
 #else  // CMAP256
 
 static struct color colors[256];
-
+static uint32_t palette_lut[256];
 
 #endif  // CMAP256
 
@@ -200,31 +200,14 @@ void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels)
 // Used by the 2D-parallel I_FinishUpdate where each thread owns full rows.
 void cmap_to_fb_single(uint8_t *out, uint8_t *in, int in_pixels)
 {
-    int i, j, k;
-    struct color c;
-    uint32_t pix;
-    uint16_t r, g, b;
-    uint32_t bytes_pp = s_Fb.bits_per_pixel / 8;
+    uint32_t *out32 = (uint32_t *)out;
+    int i, k;
 
     for (i = 0; i < in_pixels; i++)
     {
-        c = colors[in[i]];
-        r = (uint16_t) (c.r >> (8 - s_Fb.red.length));
-        g = (uint16_t) (c.g >> (8 - s_Fb.green.length));
-        b = (uint16_t) (c.b >> (8 - s_Fb.blue.length));
-        pix = r << s_Fb.red.offset;
-        pix |= g << s_Fb.green.offset;
-        pix |= b << s_Fb.blue.offset;
-
-        uint8_t *out_current = out + i * fb_scaling * bytes_pp;
+        uint32_t pix = palette_lut[in[i]];
         for (k = 0; k < fb_scaling; k++)
-        {
-            for (j = 0; j < bytes_pp; j++)
-            {
-                *out_current = (pix >> (j * 8));
-                out_current++;
-            }
-        }
+            *out32++ = pix;
     }
 }
 
@@ -498,6 +481,17 @@ void I_SetPalette (byte* palette)
         colors[i].g = gammatable[usegamma][*palette++];
         colors[i].b = gammatable[usegamma][*palette++];
     }
+
+#ifndef CMAP256
+    for (i=0; i<256; ++i ) {
+        uint32_t r = (uint32_t)(colors[i].r >> (8 - s_Fb.red.length));
+        uint32_t g = (uint32_t)(colors[i].g >> (8 - s_Fb.green.length));
+        uint32_t b = (uint32_t)(colors[i].b >> (8 - s_Fb.blue.length));
+        palette_lut[i] = (r << s_Fb.red.offset)
+                       | (g << s_Fb.green.offset)
+                       | (b << s_Fb.blue.offset);
+    }
+#endif
 
 #ifdef CMAP256
 

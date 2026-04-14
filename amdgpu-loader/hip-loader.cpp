@@ -84,7 +84,7 @@ static cl::opt<bool> help("h", cl::desc("Alias for -help"), cl::Hidden,
 
 static cl::opt<unsigned>
     threads_x("threads-x", cl::desc("Number of threads in the 'x' dimension"),
-              cl::init(256), cl::cat(loader_category));
+              cl::init(1024), cl::cat(loader_category));
 static cl::opt<unsigned>
     threads_y("threads-y", cl::desc("Number of threads in the 'y' dimension"),
               cl::init(1), cl::cat(loader_category));
