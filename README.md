@@ -22,8 +22,10 @@ This fork adds Windows support using HIP on AMD RDNA GPUs. Key changes:
 * **Parallel software renderer** distributing output rows across GPU threads
   (256 default), achieving ~70 FPS at 1280x800
 * **Sound effects** via SDL_mixer using DMX-to-WAV conversion on the host
-* **Music playback** via SDL_mixer with MUS-to-MIDI conversion, using native
-  MIDI on Windows (wavetable synth) and Timidity on Linux
+* **Music playback** via vendored FluidSynth + Roland SC-55 soundfont for
+  authentic DOOM music. MUS lumps are converted to MIDI with a DMX-compatible
+  initialization preamble (GM reset, pitch bend sensitivity, channel defaults).
+  Falls back to native MIDI / TiMidity if the soundfont is missing.
 * **On-screen FPS overlay** drawn with the in-game HUD font
 
 See `BUILD_REFERENCE.md` for detailed build/run instructions and

@@ -17,6 +17,7 @@
 #include "llvm/Support/WithColor.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -530,7 +531,34 @@ static uint32_t snd_poll() {
   return mask;
 }
 
+static std::string get_exe_dir() {
+#ifdef _WIN32
+  char buf[MAX_PATH];
+  DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+  if (len > 0) {
+    std::string path(buf, len);
+    auto pos = path.find_last_of("\\/");
+    if (pos != std::string::npos)
+      return path.substr(0, pos);
+  }
+#endif
+  return ".";
+}
+
 static void init_sdl_audio() {
+  std::string sf2 = get_exe_dir() + "/Roland.SC-55.sf2";
+  FILE *test = fopen(sf2.c_str(), "rb");
+  if (test) {
+    fclose(test);
+    Mix_SetSoundFonts(sf2.c_str());
+    SDL_SetHint("SDL_MIXER_DISABLE_NATIVEMIDI", "1");
+    SDL_SetHint("SDL_MIXER_DISABLE_TIMIDITY", "1");
+    fprintf(stderr, "[snd] SoundFont: %s (FluidSynth forced)\n", sf2.c_str());
+  } else {
+    fprintf(stderr, "[snd] SoundFont not found at %s, using fallback MIDI\n",
+            sf2.c_str());
+  }
+
   if (Mix_OpenAudio(SND_OUTPUT_RATE, MIX_DEFAULT_FORMAT, 2, 1024) < 0) {
     fprintf(stderr, "[snd] Mix_OpenAudio failed: %s\n", Mix_GetError());
     return;
@@ -577,6 +605,52 @@ struct MidiWriter {
   void writeEvent3(uint8_t s, uint8_t d1, uint8_t d2) {
     writeTime(queuedtime); write8(s); write8(d1); write8(d2); tracksize += 3;
   }
+  void writeVarLen(unsigned int val) {
+    unsigned int buffer = val & 0x7F;
+    while ((val >>= 7) != 0) { buffer <<= 8; buffer |= ((val & 0x7F) | 0x80); }
+    for (;;) {
+      write8(buffer & 0xFF); tracksize++;
+      if (buffer & 0x80) buffer >>= 8;
+      else return;
+    }
+  }
+  void writeSysEx(const uint8_t *data, int len) {
+    writeTime(queuedtime);
+    write8(0xF0);
+    tracksize++;
+    writeVarLen(len - 1);
+    for (int i = 1; i < len; i++) { write8(data[i]); tracksize++; }
+  }
+  void writeDMXPreamble() {
+    // GM System On -- resets the synth to General MIDI defaults.
+    static const uint8_t gm_on[] = {0xF0,0x7E,0x7F,0x09,0x01,0xF7};
+    writeSysEx(gm_on, sizeof(gm_on));
+
+    for (int ch = 0; ch < 16; ch++) {
+      // Reset all controllers (param2=0 to avoid MS GS volume reset bug).
+      writeEvent3(0xB0|ch, 0x79, 0);
+      // Pan = 64 (center).
+      writeEvent3(0xB0|ch, 0x0A, 64);
+      // Bank Select MSB/LSB = 0 (GM bank).
+      writeEvent3(0xB0|ch, 0x00, 0);
+      writeEvent3(0xB0|ch, 0x20, 0);
+      // Program Change = 0 (Acoustic Grand Piano default).
+      writeEvent2(0xC0|ch, 0);
+      // Reverb = 40 (DMX default).
+      writeEvent3(0xB0|ch, 0x5B, 40);
+      // Chorus = 0.
+      writeEvent3(0xB0|ch, 0x5D, 0);
+
+      // Pitch Bend Sensitivity = +/- 2 semitones via RPN.
+      // MS GS Wavetable Synth doesn't reset this on its own.
+      writeEvent3(0xB0|ch, 0x64, 0);   // RPN LSB = 0
+      writeEvent3(0xB0|ch, 0x65, 0);   // RPN MSB = 0
+      writeEvent3(0xB0|ch, 0x06, 2);   // Data Entry MSB = 2 semitones
+      writeEvent3(0xB0|ch, 0x26, 0);   // Data Entry LSB = 0 cents
+      writeEvent3(0xB0|ch, 0x64, 127); // RPN LSB = null
+      writeEvent3(0xB0|ch, 0x65, 127); // RPN MSB = null
+    }
+  }
   int getMIDIChannel(int mus_ch) {
     if (mus_ch == 15) return 9;
     if (channel_map[mus_ch] == -1) {
@@ -609,6 +683,7 @@ static bool mus_to_midi(const uint8_t *mus, int muslen,
       'M','T','r','k', 0,0,0,0
   };
   w.write(hdr, sizeof(hdr));
+  w.writeDMXPreamble();
 
   int pos = scorestart;
   bool hitend = false;
@@ -698,8 +773,19 @@ static uint32_t mus_register(const uint8_t *data, int len) {
     return 0;
   }
 
-  fprintf(stderr, "[mus] Registered song (%d bytes MUS -> %zu bytes MIDI)\n",
-          len, midi.size());
+  Mix_MusicType mtype = Mix_GetMusicType(current_music);
+  const char *backend = "unknown";
+  switch (mtype) {
+    case MUS_MID: backend = "MIDI (native/timidity/fluidsynth)"; break;
+    case MUS_WAV: backend = "WAV"; break;
+    case MUS_MOD: backend = "MOD"; break;
+    case MUS_OGG: backend = "OGG"; break;
+    default: break;
+  }
+  fprintf(stderr, "[mus] Registered song (%d bytes MUS -> %zu bytes MIDI, type=%s)\n",
+          len, midi.size(), backend);
+  fprintf(stderr, "[mus] SoundFonts: %s\n",
+          Mix_GetSoundFonts() ? Mix_GetSoundFonts() : "(none)");
   return mus_next_handle++;
 }
 
@@ -722,8 +808,11 @@ static void mus_stop() {
 }
 
 static void mus_set_volume(int vol) {
-  // Doom volume: 0-127, SDL_mixer: 0-128
-  Mix_VolumeMusic(vol);
+  // DMX uses sqrtf(vol/120) as a scaling factor for channel volume.
+  float factor = sqrtf((float)vol / 120.0f);
+  int scaled = (int)(factor * MIX_MAX_VOLUME + 0.5f);
+  if (scaled > MIX_MAX_VOLUME) scaled = MIX_MAX_VOLUME;
+  Mix_VolumeMusic(scaled);
 }
 
 static void mus_pause() {

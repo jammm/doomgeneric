@@ -74,7 +74,9 @@ if(WIN32)
       "$<TARGET_FILE:SDL2>" "$<TARGET_FILE_DIR:hip-loader>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "$<TARGET_FILE:SDL2_mixer>" "$<TARGET_FILE_DIR:hip-loader>"
-    COMMENT "Copying SDL2.dll and SDL2_mixer.dll beside hip-loader.exe"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_SOURCE_DIR}/soundfonts/Roland.SC-55.sf2" "$<TARGET_FILE_DIR:hip-loader>"
+    COMMENT "Copying SDL2.dll, SDL2_mixer.dll, and soundfont beside hip-loader.exe"
   )
 endif()
 

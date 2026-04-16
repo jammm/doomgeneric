@@ -70,12 +70,53 @@ if(MSVC OR (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND WIN32))
 endif()
 
 # ---------------------------------------------------------------------------
-# SDL2_mixer (vendored, MIDI-only)
+# FluidSynth (vendored, minimal static build for SC-55 soundfont playback)
+# ---------------------------------------------------------------------------
+set(_SAVE_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+set(osal "cpp11" CACHE STRING "" FORCE)
+set(enable-alsa OFF CACHE BOOL "" FORCE)
+set(enable-aufile OFF CACHE BOOL "" FORCE)
+set(enable-dbus OFF CACHE BOOL "" FORCE)
+set(enable-dsound OFF CACHE BOOL "" FORCE)
+set(enable-ipv6 OFF CACHE BOOL "" FORCE)
+set(enable-jack OFF CACHE BOOL "" FORCE)
+set(enable-ladspa OFF CACHE BOOL "" FORCE)
+set(enable-libinstpatch OFF CACHE BOOL "" FORCE)
+set(enable-libsndfile OFF CACHE BOOL "" FORCE)
+set(enable-midishare OFF CACHE BOOL "" FORCE)
+set(enable-network OFF CACHE BOOL "" FORCE)
+set(enable-opensles OFF CACHE BOOL "" FORCE)
+set(enable-oboe OFF CACHE BOOL "" FORCE)
+set(enable-oss OFF CACHE BOOL "" FORCE)
+set(enable-pipewire OFF CACHE BOOL "" FORCE)
+set(enable-portaudio OFF CACHE BOOL "" FORCE)
+set(enable-pulseaudio OFF CACHE BOOL "" FORCE)
+set(enable-readline OFF CACHE BOOL "" FORCE)
+set(enable-sdl3 OFF CACHE BOOL "" FORCE)
+set(enable-wasapi OFF CACHE BOOL "" FORCE)
+set(enable-waveout OFF CACHE BOOL "" FORCE)
+set(enable-winmidi OFF CACHE BOOL "" FORCE)
+set(enable-openmp OFF CACHE BOOL "" FORCE)
+set(enable-limiter OFF CACHE BOOL "" FORCE)
+set(enable-native-dls OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/fluidsynth EXCLUDE_FROM_ALL)
+set(BUILD_SHARED_LIBS ${_SAVE_BUILD_SHARED_LIBS})
+add_library(FluidSynth::libfluidsynth ALIAS libfluidsynth)
+
+# Pre-set FindFluidSynth cache variables so SDL_mixer's find_package succeeds
+# without searching the system. The real linking goes through the alias target.
+set(FluidSynth_LIBRARY "fluidsynth-vendored" CACHE FILEPATH "" FORCE)
+set(FluidSynth_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fluidsynth/include" CACHE PATH "" FORCE)
+
+# ---------------------------------------------------------------------------
+# SDL2_mixer (vendored, MIDI-only with FluidSynth)
 # ---------------------------------------------------------------------------
 set(SDL2MIXER_MIDI ON CACHE BOOL "" FORCE)
 set(SDL2MIXER_MIDI_NATIVE ON CACHE BOOL "" FORCE)
 set(SDL2MIXER_MIDI_TIMIDITY ON CACHE BOOL "" FORCE)
-set(SDL2MIXER_MIDI_FLUIDSYNTH OFF CACHE BOOL "" FORCE)
+set(SDL2MIXER_MIDI_FLUIDSYNTH ON CACHE BOOL "" FORCE)
+set(SDL2MIXER_MIDI_FLUIDSYNTH_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL2MIXER_MP3 OFF CACHE BOOL "" FORCE)
 set(SDL2MIXER_FLAC OFF CACHE BOOL "" FORCE)
 set(SDL2MIXER_MOD OFF CACHE BOOL "" FORCE)
@@ -88,6 +129,10 @@ set(SDL2MIXER_INSTALL OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/SDL_mixer EXCLUDE_FROM_ALL)
 
+# SDL_mixer's cmake_dependent_option forces FluidSynth OFF when VENDORED=ON.
+# Manually inject FluidSynth support into the already-created SDL2_mixer target.
+target_compile_definitions(SDL2_mixer PRIVATE MUSIC_MID_FLUIDSYNTH)
+target_link_libraries(SDL2_mixer PRIVATE FluidSynth::libfluidsynth)
 
 # ---------------------------------------------------------------------------
 # Sub-projects
